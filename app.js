@@ -468,6 +468,279 @@ async function doCompare() {
     out.filter((a) => a.error).map((a) => '<p class="muted">' + esc(a.code) + "：" + esc(a.error) + "</p>").join("");
 }
 
+/* ---------- 回測統計（MACD 金叉死叉） ---------- */
+async function doBacktest() {
+  const raw = $("bt-code").value.trim() || ($("q").value.trim() || "2330");
+  let code = raw;
+  if (!/^\d/.test(code)) {
+    const hit = Object.entries(NAME_FALLBACK).find(([, n]) => n === code || code.includes(n));
+    if (hit) code = hit[0];
+  }
+  if (!/^\d{4}[A-Z]?$/.test(code)) { $("bt-status").textContent = "代號格式不正確：" + raw; return; }
+  $("bt-status").textContent = "抓取 " + code + " 近一年半日線、計算訊號中…";
+  $("backtest-result").innerHTML = "";
+  try {
+    const end = fmtDate(new Date());
+    const start = fmtDate(addDays(new Date(), -560));
+    const price = await finmind("TaiwanStockPrice", code, start, end, {});
+    if (!price.length) throw new Error(code + " 查無股價資料");
+    price.sort((a, b) => a.date < b.date ? -1 : 1);
+    const closes = price.map((r) => r.close);
+    const opens = price.map((r) => r.open);
+    const { dif, dea } = macd(closes);
+    // 訊號：DIF 上穿 DEA 買、下穿賣，隔日開盤價執行
+    const trades = [];
+    let pos = null;
+    for (let i = 1; i < price.length - 1; i++) {
+      if (dif[i - 1] === null || dea[i - 1] === null) continue;
+      const gold = dif[i - 1] <= dea[i - 1] && dif[i] > dea[i];
+      const dead = dif[i - 1] >= dea[i - 1] && dif[i] < dea[i];
+      const execPrice = opens[i + 1];
+      if (!execPrice) continue;
+      if (gold && !pos) pos = { buyDate: price[i + 1].date, buyPrice: execPrice };
+      else if (dead && pos) {
+        trades.push({ ...pos, sellDate: price[i + 1].date, sellPrice: execPrice });
+        pos = null;
+      }
+    }
+    if (pos) trades.push({ ...pos, sellDate: price[price.length - 1].date + "（持有中）", sellPrice: closes[closes.length - 1], open: true });
+    const rets = trades.map((t) => (t.sellPrice - t.buyPrice) / t.buyPrice * 100);
+    const wins = rets.filter((r) => r > 0).length;
+    const avg = rets.length ? rets.reduce((s, r) => s + r, 0) / rets.length : 0;
+    const cum = rets.reduce((eq, r) => eq * (1 + r / 100), 1);
+    const cumPct = (cum - 1) * 100;
+    // Buy & Hold：第一次買訊號日的隔日開盤 → 最後收盤
+    let bhPct = null;
+    if (trades.length) {
+      bhPct = (closes[closes.length - 1] - trades[0].buyPrice) / trades[0].buyPrice * 100;
+    }
+    // 最大回檔（權益曲線）
+    let peak = 1, maxDD = 0, eq = 1;
+    const eqCurve = [1];
+    for (const r of rets) {
+      eq *= (1 + r / 100);
+      eqCurve.push(eq);
+      if (eq > peak) peak = eq;
+      const dd = (eq - peak) / peak * 100;
+      if (dd < maxDD) maxDD = dd;
+    }
+    const name = await resolveName(code, false);
+    $("bt-status").textContent = "完成：共 " + trades.length + " 筆已完成/持有中交易（近 " + price.length + " 個交易日）。";
+    const rows = trades.slice(-20).reverse().map((t) =>
+      "<tr><td class='num'>" + esc(t.buyDate) + "</td><td class='num'>" + fmtNum(t.buyPrice) + "</td>" +
+      "<td class='num'>" + esc(t.sellDate) + "</td><td class='num'>" + fmtNum(t.sellPrice) + "</td>" +
+      "<td class='num " + (((t.sellPrice - t.buyPrice) >= 0) ? "up" : "down") + "'>" +
+      (((t.sellPrice - t.buyPrice) / t.buyPrice * 100) > 0 ? "+" : "") + fmtNum((t.sellPrice - t.buyPrice) / t.buyPrice * 100) + "%</td></tr>"
+    ).join("");
+    $("backtest-result").innerHTML =
+      '<div class="grid-4">' +
+      '<div class="cell"><b>交易次數</b><span class="num" style="font-size:20px">' + trades.length + '</span><br><span class="muted">' + esc(name) + " " + esc(code) + '</span></div>' +
+      '<div class="cell"><b>勝率</b><span class="num" style="font-size:20px">' + (rets.length ? fmtNum(wins / rets.length * 100, 1) + "%" : "—") + '</span><br><span class="muted">獲利 ' + wins + ' / 虧損 ' + (rets.length - wins) + '</span></div>' +
+      '<div class="cell"><b>平均單筆報酬</b><span class="num" style="font-size:20px">' + (avg >= 0 ? "+" : "") + fmtNum(avg) + '%</span><br><span class="muted">累積 ' + (cumPct >= 0 ? "+" : "") + fmtNum(cumPct) + '%</span></div>' +
+      '<div class="cell"><b>最大回檔 / Buy&Hold</b><span class="num" style="font-size:20px">' + fmtNum(maxDD, 1) + '%</span><br><span class="muted">同期持有 ' + (bhPct === null ? "—" : (bhPct >= 0 ? "+" : "") + fmtNum(bhPct) + "%") + '</span></div></div>' +
+      '<h3>權益曲線（複利，起始 = 1）</h3><canvas class="chart" id="bt-chart"></canvas>' +
+      '<h3>最近交易（最多 20 筆）</h3><div class="table-wrap"><table><thead><tr><th>買入日</th><th>買價</th><th>賣出日</th><th>賣價</th><th>報酬</th></tr></thead><tbody>' + (rows || "<tr><td colspan='5'>無交易訊號</td></tr>") + '</tbody></table></div>' +
+      '<div class="alert" style="margin-top:10px">規則固定、未計手續費稅費與滑價；訊號多空皆可能連續虧損，僅供檢驗「MACD 交叉」在該股近期的方向性，不代表未來績效。</div>';
+    drawEquity($("bt-chart"), eqCurve);
+  } catch (e) {
+    $("bt-status").textContent = "回測失敗：" + (e instanceof Error ? e.message : e);
+  }
+}
+function drawEquity(canvas, curve) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600, h = 250;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (!curve.length) return;
+  const lo = Math.min(...curve, 1), hi = Math.max(...curve, 1);
+  const pad = (hi - lo) * 0.15 || 0.01;
+  const X = (i) => 8 + (i / Math.max(1, curve.length - 1)) * (w - 16);
+  const Y = (v) => 10 + (1 - (v - lo + pad) / (hi - lo + 2 * pad)) * (h - 20);
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--border") || "#ddd";
+  for (let g = 0; g < 4; g++) {
+    const y = 10 + (g / 3) * (h - 20);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  // 起始線
+  ctx.strokeStyle = "#8a94a6"; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(0, Y(1)); ctx.lineTo(w, Y(1)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = curve[curve.length - 1] >= 1 ? "#c81e1e" : "#15803d";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  curve.forEach((v, i) => { if (i === 0) ctx.moveTo(X(i), Y(v)); else ctx.lineTo(X(i), Y(v)); });
+  ctx.stroke();
+}
+
+/* ---------- 除息雷達 ---------- */
+let divScanning = false;
+async function doDividend() {
+  if (divScanning) return;
+  const poolSel = $("div-pool").value;
+  const pool = poolSel === "watch" ? getWatch().map((x) => x.code) : TOP50.slice();
+  if (!pool.length) { $("div-status").textContent = "追蹤清單是空的，先到個股診斷加入。"; return; }
+  divScanning = true;
+  $("btn-dividend").disabled = true;
+  $("dividend-result").innerHTML = "";
+  const end = fmtDate(new Date());
+  const yearAgo = fmtDate(addDays(new Date(), -365));
+  const out = [];
+  let ok = 0, fail = 0;
+  for (let idx = 0; idx < pool.length; idx++) {
+    const code = pool[idx];
+    $("div-status").textContent = "掃描中 " + (idx + 1) + " / " + pool.length + "（成功 " + ok + "，失敗 " + fail + "）";
+    $("div-bar").style.width = Math.round((idx / pool.length) * 100) + "%";
+    try {
+      const [divs, price] = await Promise.all([
+        finmind("TaiwanStockDividend", code, yearAgo, end, {}),
+        finmind("TaiwanStockPrice", code, fmtDate(addDays(new Date(), -10)), end, {}),
+      ]);
+      ok++;
+      const seen = {};
+      for (const d of divs) {
+        const ex = d.CashExDividendTradingDate || "";
+        if (!ex || ex < yearAgo) continue;
+        const amt = Number(d.CashEarningsDistribution || 0) + Number(d.CashStatutorySurplus || 0);
+        if (!seen[ex] || amt > seen[ex]) seen[ex] = amt;
+      }
+      const exDates = Object.keys(seen).sort();
+      const sum = exDates.reduce((s, k) => s + seen[k], 0);
+      const last = price.length ? price[price.length - 1] : null;
+      const yld = (last && sum > 0) ? sum / last.close * 100 : 0;
+      out.push({ code, name: await resolveName(code, false), sum, yld, count: exDates.length, lastEx: exDates.length ? exDates[exDates.length - 1] : "—", close: last ? last.close : null });
+      renderDividend(out);
+    } catch (e) { fail++; }
+    await sleep(350);
+  }
+  $("div-bar").style.width = "100%";
+  $("div-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "。殖利率 = 近一年已公告現金股利合計 / 現價。";
+  divScanning = false;
+  $("btn-dividend").disabled = false;
+}
+function renderDividend(list) {
+  const sort = $("div-sort").value;
+  const arr = list.slice().sort((a, b) => {
+    if (sort === "amount") return b.sum - a.sum;
+    if (sort === "code") return a.code < b.code ? -1 : 1;
+    return b.yld - a.yld;
+  });
+  $("dividend-result").innerHTML = '<div class="table-wrap"><table><thead><tr><th>個股</th><th>現價</th><th>近一年現金股利</th><th>殖利率</th><th>除息次數</th><th>最近除息日</th></tr></thead><tbody>' +
+    arr.map((r) => "<tr><td><b>" + esc(r.name) + '</b> <span class="muted num">' + esc(r.code) + "</span></td>" +
+      "<td class='num'>" + (r.close === null ? "—" : fmtNum(r.close)) + "</td>" +
+      "<td class='num'>" + fmtNum(r.sum) + "</td>" +
+      "<td class='num " + (r.yld >= 5 ? "up" : "") + "'>" + fmtNum(r.yld) + "%</td>" +
+      "<td class='num'>" + r.count + "</td><td class='num'>" + esc(r.lastEx) + "</td></tr>").join("") +
+    '</tbody></table></div><div class="alert" style="margin-top:10px">殖利率用「已公告」合計計算；尚未公告最新一期的個股會被低估。高殖利率常伴隨除息前後的大幅波動與貼息風險，僅供篩選起點。</div>';
+}
+
+/* ---------- 板塊氣泡圖 ---------- */
+let secScanning = false;
+async function doSector() {
+  if (secScanning) return;
+  const poolSel = $("sec-pool").value;
+  const pool = poolSel === "watch" ? getWatch().map((x) => x.code) : TOP50.slice();
+  if (!pool.length) { $("sec-status").textContent = "追蹤清單是空的，先到個股診斷加入。"; return; }
+  secScanning = true;
+  $("btn-sector").disabled = true;
+  $("sector-result").innerHTML = "";
+  const groups = {};
+  let ok = 0, fail = 0;
+  for (let idx = 0; idx < pool.length; idx++) {
+    const code = pool[idx];
+    $("sec-status").textContent = "掃描中 " + (idx + 1) + " / " + pool.length + "（成功 " + ok + "，失敗 " + fail + "）";
+    $("sec-bar").style.width = Math.round((idx / pool.length) * 100) + "%";
+    try {
+      const a = await analyze(code);
+      ok++;
+      let cat = "未分類";
+      try {
+        const info = await finmind("TaiwanStockInfo", code, "2024-01-01", fmtDate(new Date()), {});
+        if (info && info.length) cat = info[info.length - 1].industry_category || "未分類";
+      } catch (e) { /* 保留未分類 */ }
+      const closes = a.closes;
+      const base = closes[Math.max(0, closes.length - 21)] || closes[0];
+      const ret20 = base ? (closes[closes.length - 1] - base) / base * 100 : 0;
+      const inst5 = (a.f5 + a.t5 + a.d5) / 1000; // 張
+      groups[cat] = groups[cat] || { cat, ret: [], inst: [], vol: [], members: [] };
+      groups[cat].ret.push(ret20);
+      groups[cat].inst.push(inst5);
+      groups[cat].vol.push(a.volume);
+      groups[cat].members.push({ code, name: a.name, ret20, inst5 });
+      renderSector(groups);
+    } catch (e) { fail++; }
+    await sleep(350);
+  }
+  $("sec-bar").style.width = "100%";
+  $("sec-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "，涵蓋 " + Object.keys(groups).length + " 個板塊。點下方表格代號可載入個股診斷。";
+  secScanning = false;
+  $("btn-sector").disabled = false;
+}
+function renderSector(groups) {
+  const rows = Object.values(groups).map((g) => ({
+    cat: g.cat,
+    n: g.members.length,
+    ret: g.ret.reduce((s, v) => s + v, 0) / Math.max(1, g.ret.length),
+    inst: g.inst.reduce((s, v) => s + v, 0),
+    vol: g.vol.reduce((s, v) => s + v, 0) / Math.max(1, g.vol.length),
+    members: g.members.slice().sort((a, b) => b.inst5 - a.inst5).slice(0, 3),
+  })).sort((a, b) => b.inst - a.inst);
+  drawSector($("sector-chart"), rows);
+  $("sector-result").innerHTML = '<div class="table-wrap"><table><thead><tr><th>板塊</th><th>檔數</th><th>平均 20 日漲跌</th><th>法人 5 日合計（張）</th><th>均量（張）</th><th>代表個股</th></tr></thead><tbody>' +
+    rows.map((r) => "<tr><td>" + esc(r.cat) + "</td><td class='num'>" + r.n + "</td>" +
+      "<td class='num " + (r.ret >= 0 ? "up" : "down") + "'>" + (r.ret >= 0 ? "+" : "") + fmtNum(r.ret) + "%</td>" +
+      "<td class='num " + (r.inst >= 0 ? "up" : "down") + "'>" + fmtInt(r.inst) + "</td>" +
+      "<td class='num'>" + fmtInt(r.vol / 1000) + "</td>" +
+      "<td>" + r.members.map((m) => "<a href='#' data-c='" + esc(m.code) + "'>" + esc(m.name) + " " + esc(m.code) + "</a>").join(" · ") + "</td></tr>").join("") +
+    "</tbody></table></div>";
+  document.querySelectorAll("#sector-result a").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); doAnalyze(a.getAttribute("data-c")); switchTab("stock"); }));
+}
+function drawSector(canvas, rows) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600, h = 320;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (!rows.length) return;
+  const xs = rows.map((r) => r.ret), ys = rows.map((r) => r.inst);
+  let x0 = Math.min(...xs, 0), x1 = Math.max(...xs, 0);
+  let y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0);
+  if (x1 === x0) { x1 += 1; x0 -= 1; }
+  if (y1 === y0) { y1 += 1; y0 -= 1; }
+  const padL = 56, padR = 12, padT = 12, padB = 30;
+  const X = (v) => padL + (v - x0) / (x1 - x0) * (w - padL - padR);
+  const Y = (v) => padT + (1 - (v - y0) / (y1 - y0)) * (h - padT - padB);
+  const css = getComputedStyle(document.documentElement);
+  ctx.strokeStyle = css.getPropertyValue("--border") || "#ddd";
+  ctx.fillStyle = css.getPropertyValue("--muted") || "#888";
+  ctx.font = "11px sans-serif";
+  for (let g = 0; g <= 4; g++) {
+    const xv = x0 + (x1 - x0) * g / 4;
+    ctx.beginPath(); ctx.moveTo(X(xv), padT); ctx.lineTo(X(xv), h - padB); ctx.stroke();
+    ctx.fillText(fmtNum(xv, 1) + "%", X(xv) - 14, h - 12);
+  }
+  // 零軸
+  ctx.strokeStyle = "#8a94a6";
+  ctx.beginPath(); ctx.moveTo(X(0), padT); ctx.lineTo(X(0), h - padB); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(w - padR, Y(0)); ctx.stroke();
+  const vols = rows.map((r) => r.vol);
+  const vMax = Math.max(...vols);
+  const palette = ["#2563eb", "#c81e1e", "#15803d", "#b45309", "#7c3aed", "#0e7490", "#be185d", "#4d7c0f"];
+  rows.forEach((r, i) => {
+    const rad = 6 + 22 * Math.sqrt(r.vol / Math.max(1, vMax));
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = palette[i % palette.length];
+    ctx.beginPath(); ctx.arc(X(r.ret), Y(r.inst), rad, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = css.getPropertyValue("--text") || "#000";
+    ctx.fillText(r.cat.slice(0, 6), X(r.ret) + rad + 3, Y(r.inst) + 4);
+  });
+}
+
 /* ---------- 追蹤 / 最近 ---------- */
 function getWatch() {
   try { return JSON.parse(localStorage.getItem(LS_WATCH) || "[]"); } catch (e) { return []; }
@@ -516,6 +789,9 @@ function switchTab(name) {
   $("tab-stock").hidden = name !== "stock";
   $("tab-scan").hidden = name !== "scan";
   $("tab-compare").hidden = name !== "compare";
+  $("tab-backtest").hidden = name !== "backtest";
+  $("tab-dividend").hidden = name !== "dividend";
+  $("tab-sector").hidden = name !== "sector";
   $("tab-watch").hidden = name !== "watch";
   if (name === "watch") renderWatch();
 }
@@ -535,6 +811,9 @@ function methodHtml() {
     "<span class='muted'>位置</span><span>收盤在近 60 日與近一年高低區間的百分位，愈高愈接近壓力。</span>" +
     "<span class='muted'>六維度</span><span>MACD 柱狀、DIF/DEA、零軸、法人、均線、KD，各 0–1 分；法人雙買超最多 1.5 分，合計 6 分。</span>" +
     "<span class='muted'>海選</span><span>底部探測看跌深＋法人回補＋動能；MACD 結構看六維度 ≥4；碎骨看超跌；法人連買看法人連續性。掃描有節流，大池請耐心等。</span>" +
+    "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
+    "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
+    "<span class='muted'>板塊</span><span>X 為 20 日漲跌、Y 為 5 日法人合計（張）、氣泡為均量；產業來自 FinMind 分類。</span>" +
     "</div><div class='alert' style='margin-top:10px'>免費額度有限（匿名＋個人 Token 每日約數百次）。掃描 50 檔會消耗約 100 次查詢，建議先設 Token、必要時再掃。</div>";
 }
 
@@ -551,6 +830,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-scan").addEventListener("click", doScan);
   $("sort").addEventListener("change", () => { /* 下次渲染生效 */ });
   $("btn-compare").addEventListener("click", doCompare);
+  $("btn-backtest").addEventListener("click", doBacktest);
+  $("bt-code").addEventListener("keydown", (e) => { if (e.key === "Enter") doBacktest(); });
+  $("btn-dividend").addEventListener("click", doDividend);
+  $("div-sort").addEventListener("change", () => { /* 下次渲染生效 */ });
+  $("btn-sector").addEventListener("click", doSector);
   $("btn-theme").addEventListener("click", () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
   $("btn-token").addEventListener("click", () => { $("token-input").value = getToken(); $("dlg-token").showModal(); });
   $("token-cancel").addEventListener("click", () => $("dlg-token").close());

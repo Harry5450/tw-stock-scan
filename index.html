@@ -47,6 +47,9 @@
     <button type="button" data-tab="stock" class="active">個股診斷</button>
     <button type="button" data-tab="scan">海選掃描</button>
     <button type="button" data-tab="compare">多股比較</button>
+    <button type="button" data-tab="backtest">回測統計</button>
+    <button type="button" data-tab="dividend">除息雷達</button>
+    <button type="button" data-tab="sector">板塊氣泡</button>
     <button type="button" data-tab="watch">追蹤清單</button>
   </nav>
 
@@ -96,6 +99,56 @@
     <div id="compare-result" style="margin-top:12px"></div>
   </section>
 
+  <section class="card" id="tab-backtest" hidden aria-label="回測統計">
+    <h2>回測統計（MACD 金叉死叉）</h2>
+    <p class="sub">規則：DIF 上穿 DEA 買進（隔日開盤價）、下穿賣出（隔日開盤價），持有至下一個反向訊號。近 300 個交易日的訊號回測，不含手續費稅費與滑價，僅衡量訊號本身的方向性。</p>
+    <div class="row">
+      <input id="bt-code" type="text" placeholder="代號，例如 2330" style="width:160px" />
+      <button id="btn-backtest" class="primary" type="button">跑回測</button>
+      <span class="muted" id="bt-status" style="font-size:12.5px"></span>
+    </div>
+    <div id="backtest-result" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="tab-dividend" hidden aria-label="除息雷達">
+    <h2>除息雷達</h2>
+    <p class="sub">掃描股票池近一年現金股利與除息日，依殖利率與「距離下次除息季」排序。注意：FinMind 配息資料按公告揭露，部分個股最新一期可能尚未公告，殖利率以近一年已公告現金股利合計 / 現價計算。</p>
+    <div class="row">
+      <label for="div-pool">股票池</label>
+      <select id="div-pool">
+        <option value="top50">市值前 50 大</option>
+        <option value="watch">我的追蹤清單</option>
+      </select>
+      <label for="div-sort">排序</label>
+      <select id="div-sort">
+        <option value="yield">依殖利率</option>
+        <option value="amount">依股利金額</option>
+        <option value="code">依代號</option>
+      </select>
+      <button id="btn-dividend" class="primary" type="button">開始掃描</button>
+      <span class="muted" id="div-status" style="font-size:12.5px"></span>
+    </div>
+    <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="div-bar" style="width:0%"></i></div></div>
+    <div id="dividend-result" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="tab-sector" hidden aria-label="板塊氣泡">
+    <h2>板塊氣泡圖</h2>
+    <p class="sub">X 軸：近 20 日漲跌幅（%）。Y 軸：近 5 日法人買賣超合計（外資＋投信＋自營，張）。氣泡大小：近 20 日均量。產業分類來自 FinMind TaiwanStockInfo，抓不到分類的個股歸入「未分類」。</p>
+    <div class="row">
+      <label for="sec-pool">股票池</label>
+      <select id="sec-pool">
+        <option value="top50">市值前 50 大</option>
+        <option value="watch">我的追蹤清單</option>
+      </select>
+      <button id="btn-sector" class="primary" type="button">開始掃描</button>
+      <span class="muted" id="sec-status" style="font-size:12.5px"></span>
+    </div>
+    <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="sec-bar" style="width:0%"></i></div></div>
+    <canvas id="sector-chart" class="chart" style="height:320px;margin-top:12px"></canvas>
+    <div id="sector-result" style="margin-top:12px"></div>
+  </section>
+
   <section class="card" id="tab-watch" hidden aria-label="追蹤清單">
     <h2>追蹤清單</h2>
     <p class="sub">存在這台裝置的瀏覽器（localStorage），換裝置不會同步。</p>
@@ -103,7 +156,7 @@
   </section>
 
   <footer class="foot">
-    <p>資料來源：FinMind（TaiwanStockPrice、TaiwanStockInstitutionalInvestorsBuySell、TaiwanStockInfo）。未設定 Token 時以匿名額度查詢；可在右上設定個人 Token（只存本機）。指標皆由前端即時計算，公式見「方法說明」。內容僅供研究參考，不構成投資建議。 past performance 不代表未來。</p>
+    <p>資料來源：FinMind（TaiwanStockPrice、TaiwanStockInstitutionalInvestorsBuySell、TaiwanStockInfo、TaiwanStockDividend）。未設定 Token 時以匿名額度查詢；可在右上設定個人 Token（只存本機）。指標皆由前端即時計算，公式見「方法說明」。內容僅供研究參考，不構成投資建議。 past performance 不代表未來。</p>
     <p><a href="https://api.finmindtrade.com/" target="_blank" rel="noopener">FinMind 官網</a> · <a href="README.md" target="_blank" rel="noopener">部署說明</a></p>
   </footer>
 </main>
