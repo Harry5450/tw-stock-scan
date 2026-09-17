@@ -15,6 +15,42 @@ const NAME_FALLBACK = {2330:"台積電",2317:"鴻海",2454:"聯發科",2308:"台
 const memCache = new Map();
 const $ = (id) => document.getElementById(id);
 
+/* localStorage 持久快取：FinMind 日線與法人資料當日有效，減少重複查詢 */
+const LS_PFX = "twscan.cache.v1.";
+function lsGet(k) {
+  try {
+    const raw = localStorage.getItem(LS_PFX + k);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || !Array.isArray(o.data)) return null;
+    if (o.day !== fmtDate(new Date())) return null; // 跨日失效
+    return o.data;
+  } catch (e) { return null; }
+}
+function lsSet(k, data) {
+  try { localStorage.setItem(LS_PFX + k, JSON.stringify({ day: fmtDate(new Date()), data })); } catch (e) { /* 配額滿就放棄持久化 */ }
+}
+const INFO_MAP = new Map(); // stock_id -> { industry_category, stock_name }
+let infoLoaded = false;
+async function loadInfoMap(force) {
+  if (infoLoaded && !force) return INFO_MAP;
+  try {
+    const rows = await finmind("TaiwanStockInfo", "", "2025-01-01", fmtDate(new Date()), { force });
+    INFO_MAP.clear();
+    for (const r of rows || []) {
+      if (r && r.stock_id) INFO_MAP.set(String(r.stock_id), { industry_category: r.industry_category || "未分類", stock_name: r.stock_name || "" });
+    }
+    infoLoaded = true;
+  } catch (e) { /* 失敗就沿用舊對照 */ }
+  return INFO_MAP;
+}
+function infoOf(code) {
+  const hit = INFO_MAP.get(String(code));
+  if (hit) return hit;
+  const fb = NAME_FALLBACK[code];
+  return { industry_category: "未分類", stock_name: fb || "" };
+}
+
 /* ---------- 基礎 ---------- */
 function fmtDate(d) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -42,14 +78,20 @@ async function finmind(dataset, dataId, startDate, endDate, { force = false } = 
   const token = getToken();
   const key = dataset + "|" + dataId + "|" + startDate + "|" + endDate + "|" + (token ? "t" : "a");
   if (!force && memCache.has(key)) return memCache.get(key);
+  if (!force && (dataset === "TaiwanStockPrice" || dataset === "TaiwanStockInstitutionalInvestorsBuySell" || dataset === "TaiwanStockDividend")) {
+    const ls = lsGet(key);
+    if (ls) { memCache.set(key, ls); return ls; }
+  }
   const params = new URLSearchParams({ dataset, data_id: dataId, start_date: startDate, end_date: endDate });
   if (token) params.set("token", token);
   const res = await fetch(FINMIND + "?" + params.toString());
   if (!res.ok) throw new Error("FinMind HTTP " + res.status + "（" + dataset + "）");
   const j = await res.json();
   if (j.status !== 200) throw new Error("FinMind 回傳異常：" + esc(j.msg || j.status));
-  memCache.set(key, j.data || []);
-  return j.data || [];
+  const data = j.data || [];
+  memCache.set(key, data);
+  if (dataset === "TaiwanStockPrice" || dataset === "TaiwanStockInstitutionalInvestorsBuySell" || dataset === "TaiwanStockDividend") lsSet(key, data);
+  return data;
 }
 
 /* ---------- 指標 ---------- */
@@ -117,11 +159,9 @@ function macd(closes) {
 /* ---------- 分析 ---------- */
 async function resolveName(code, force) {
   if (NAME_FALLBACK[code]) return NAME_FALLBACK[code];
-  try {
-    const end = fmtDate(new Date());
-    const rows = await finmind("TaiwanStockInfo", code, "2024-01-01", end, { force });
-    if (rows && rows.length) return rows[rows.length - 1].stock_name || code;
-  } catch (e) { /* 忽略，用代號顯示 */ }
+  await loadInfoMap(force);
+  const hit = infoOf(code);
+  if (hit.stock_name) return hit.stock_name;
   return code;
 }
 
@@ -390,8 +430,8 @@ async function doScan() {
   if (scanning) return;
   const poolSel = $("pool").value;
   const mode = $("mode").value;
-  const pool = poolSel === "watch" ? getWatch().map((x) => x.code) : TOP50.slice();
-  if (!pool.length) { $("scan-status").textContent = "追蹤清單是空的，先到個股診斷加入。"; return; }
+  const pool = poolCodes(poolSel);
+  if (!pool.length) { $("scan-status").textContent = poolSel === "custom" ? "自訂池是空的，請在下方輸入代號後儲存。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
   scanning = true;
   $("btn-scan").disabled = true;
   $("scan-result").innerHTML = "";
@@ -580,8 +620,8 @@ let divScanning = false;
 async function doDividend() {
   if (divScanning) return;
   const poolSel = $("div-pool").value;
-  const pool = poolSel === "watch" ? getWatch().map((x) => x.code) : TOP50.slice();
-  if (!pool.length) { $("div-status").textContent = "追蹤清單是空的，先到個股診斷加入。"; return; }
+  const pool = poolCodes(poolSel);
+  if (!pool.length) { $("div-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
   divScanning = true;
   $("btn-dividend").disabled = true;
   $("dividend-result").innerHTML = "";
@@ -641,8 +681,8 @@ let secScanning = false;
 async function doSector() {
   if (secScanning) return;
   const poolSel = $("sec-pool").value;
-  const pool = poolSel === "watch" ? getWatch().map((x) => x.code) : TOP50.slice();
-  if (!pool.length) { $("sec-status").textContent = "追蹤清單是空的，先到個股診斷加入。"; return; }
+  const pool = poolCodes(poolSel);
+  if (!pool.length) { $("sec-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
   secScanning = true;
   $("btn-sector").disabled = true;
   $("sector-result").innerHTML = "";
@@ -655,11 +695,8 @@ async function doSector() {
     try {
       const a = await analyze(code);
       ok++;
-      let cat = "未分類";
-      try {
-        const info = await finmind("TaiwanStockInfo", code, "2024-01-01", fmtDate(new Date()), {});
-        if (info && info.length) cat = info[info.length - 1].industry_category || "未分類";
-      } catch (e) { /* 保留未分類 */ }
+      await loadInfoMap(false);
+      const cat = infoOf(code).industry_category || "未分類";
       const closes = a.closes;
       const base = closes[Math.max(0, closes.length - 21)] || closes[0];
       const ret20 = base ? (closes[closes.length - 1] - base) / base * 100 : 0;
@@ -742,6 +779,17 @@ function drawSector(canvas, rows) {
 }
 
 /* ---------- 追蹤 / 最近 ---------- */
+const LS_POOL = "twscan.custompool";
+function poolCodes(sel) {
+  if (sel === "watch") return getWatch().map((x) => x.code);
+  if (sel === "custom") {
+    try {
+      const raw = localStorage.getItem(LS_POOL) || "";
+      return raw.split(/[,\s、;]+/).map((s) => s.trim()).filter((s) => /^\d{4}[A-Z]?$/.test(s)).slice(0, 100);
+    } catch (e) { return []; }
+  }
+  return TOP50.slice();
+}
 function getWatch() {
   try { return JSON.parse(localStorage.getItem(LS_WATCH) || "[]"); } catch (e) { return []; }
 }
@@ -826,7 +874,21 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("nav.tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.getAttribute("data-tab"))));
   $("btn-analyze").addEventListener("click", () => doAnalyze($("q").value));
   $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") doAnalyze($("q").value); });
-  $("btn-refresh").addEventListener("click", () => { memCache.clear(); if ($("q").value.trim()) doAnalyze($("q").value, { force: true }); });
+  $("btn-refresh").addEventListener("click", () => {
+    memCache.clear();
+    try {
+      Object.keys(localStorage).filter((k) => k.indexOf(LS_PFX) === 0).forEach((k) => localStorage.removeItem(k));
+      infoLoaded = false;
+    } catch (e) { /* 忽略 */ }
+    if ($("q").value.trim()) doAnalyze($("q").value, { force: true });
+  });
+  try { $("custom-pool").value = localStorage.getItem(LS_POOL) || ""; } catch (e) { /* 忽略 */ }
+  $("btn-pool-save").addEventListener("click", () => {
+    const v = $("custom-pool").value.trim();
+    try { localStorage.setItem(LS_POOL, v); } catch (e) { /* 忽略 */ }
+    const n = poolCodes("custom").length;
+    $("pool-msg").textContent = n ? "已儲存 " + n + " 檔" : "已清空（格式：逗號或空白分隔的 4 碼代號）";
+  });
   $("btn-scan").addEventListener("click", doScan);
   $("sort").addEventListener("change", () => { /* 下次渲染生效 */ });
   $("btn-compare").addEventListener("click", doCompare);

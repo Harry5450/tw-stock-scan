@@ -66,6 +66,7 @@
       <select id="pool">
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
+        <option value="custom">自訂池</option>
       </select>
       <label for="mode">模式</label>
       <select id="mode">
@@ -86,6 +87,14 @@
       <span class="muted" id="scan-status" style="font-size:12.5px"></span>
     </div>
     <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="scan-bar" style="width:0%"></i></div></div>
+    <div class="row" style="margin-top:8px">
+      <label for="custom-pool">自訂池（最多 100 檔，逗號或空白分隔）</label>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <input id="custom-pool" type="text" placeholder="例如 2330,2317,2454" style="flex:1;min-width:200px" />
+      <button id="btn-pool-save" type="button">儲存自訂池</button>
+      <span class="muted" id="pool-msg" style="font-size:12.5px"></span>
+    </div>
     <div id="scan-result" class="stock-cards" style="margin-top:12px"></div>
   </section>
 
@@ -118,6 +127,7 @@
       <select id="div-pool">
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
+        <option value="custom">自訂池</option>
       </select>
       <label for="div-sort">排序</label>
       <select id="div-sort">
@@ -140,6 +150,7 @@
       <select id="sec-pool">
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
+        <option value="custom">自訂池</option>
       </select>
       <button id="btn-sector" class="primary" type="button">開始掃描</button>
       <span class="muted" id="sec-status" style="font-size:12.5px"></span>

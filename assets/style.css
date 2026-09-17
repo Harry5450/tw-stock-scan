@@ -110,6 +110,13 @@ a { color: var(--brand-2); }
 .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 @media (max-width: 880px) {
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .layout { padding: 12px 12px 48px; }
+  .card { padding: 12px; }
+  .topbar-inner { padding: 10px 12px; gap: 8px; }
+  th, td { padding: 6px 8px; font-size: 12px; }
+  .kv { grid-template-columns: 96px 1fr; }
+  .matrix { grid-template-columns: 1fr; }
+  .chart { height: 200px; }
 }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 input[type="text"], select, textarea {
