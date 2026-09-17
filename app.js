@@ -875,7 +875,7 @@ async function doDividend() {
   if (divScanning) return;
   const poolSel = $("div-pool").value;
   const pool = poolCodes(poolSel);
-  if (!pool.length) { $("div-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
+  if (!pool.length) { $("div-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : poolSel === "watch" ? "追蹤清單是空的，先到個股診斷加入。" : "「" + poolLabel(poolSel) + "」沒有成分，請換一個股票池。"; return; }
   divScanning = true;
   $("btn-dividend").disabled = true;
   $("dividend-result").innerHTML = "";
@@ -936,7 +936,7 @@ async function doSector() {
   if (secScanning) return;
   const poolSel = $("sec-pool").value;
   const pool = poolCodes(poolSel);
-  if (!pool.length) { $("sec-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
+  if (!pool.length) { $("sec-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : poolSel === "watch" ? "追蹤清單是空的，先到個股診斷加入。" : "「" + poolLabel(poolSel) + "」沒有成分，請換一個股票池。"; return; }
   secScanning = true;
   $("btn-sector").disabled = true;
   $("sector-result").innerHTML = "";
