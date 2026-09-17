@@ -298,6 +298,16 @@ async function analyze(code, { force = false } = {}) {
   }
   const dates = Object.keys(byDate).sort();
   const lastDays = dates.slice(-12).map((d) => ({ date: d, ...byDate[d] }));
+  // 板塊地圖回放用的輕量時間序列：保留股價、成交量與三大法人合計，避免重複打 API。
+  const sectorHistory = price.slice(-80).map((r) => {
+    const flow = byDate[r.date] || { foreign: 0, trust: 0, dealer: 0 };
+    return {
+      date: r.date,
+      close: Number(r.close || 0),
+      volume: Number(r.Trading_Volume || 0),
+      inst: (flow.foreign + flow.trust + flow.dealer) / 1000,
+    };
+  });
   const sum5 = (k) => dates.slice(-5).reduce((s, d) => s + byDate[d][k], 0);
   const streak = (k) => {
     let n = 0;
@@ -407,7 +417,7 @@ async function analyze(code, { force = false } = {}) {
     fStreak, tStreak, f5: sum5("foreign"), t5: sum5("trust"), d5: sum5("dealer"),
     lastDays, dims, total, verdict, tone,
     closes: closes.slice(-120), ma20line: ma20.slice(-120), dates: price.slice(-120).map((r) => r.date),
-    volume: vols[i],
+    volume: vols[i], sectorHistory,
     bbPos, bbState, bbUp: bbUp[i], bbDn: bbDn[i], bbMid: bbMid[i],
     obv5, obvState, md14, ret20, instFlow, flowQuad, diverge, sig, sigAll,
     beta20, corr20,
@@ -1058,18 +1068,276 @@ function renderDividend(list) {
     '</tbody></table></div><div class="alert" style="margin-top:10px">殖利率用「已公告」合計計算；尚未公告最新一期的個股會被低估。高殖利率常伴隨除息前後的大幅波動與貼息風險，僅供篩選起點。</div>';
 }
 
-/* ---------- 板塊氣泡圖 ---------- */
+/* ---------- 板塊資金動能地圖 ---------- */
 let secScanning = false;
+let sectorReplayTimer = null;
+let sectorState = { records: [], offset: 0, selectedKey: null, rows: [] };
+
+function sumNumbers(values) { return values.reduce((sum, value) => sum + (Number(value) || 0), 0); }
+function avgNumbers(values) { return values.length ? sumNumbers(values) / values.length : 0; }
+function fmtLots(value, digits = 0) {
+  const n = Number(value) || 0;
+  if (Math.abs(n) >= 10000) return fmtNum(n / 10000, 1) + "萬";
+  return fmtNum(n, digits);
+}
+function signedLots(value, digits = 0) { return (value >= 0 ? "+" : "") + fmtLots(value, digits); }
+function sectorPhase(row) {
+  if (row.flow >= 0 && row.accel >= 0) return { key: "tide", label: "漲潮", desc: "買超加速", color: "#2563eb" };
+  if (row.flow >= 0 && row.accel < 0) return { key: "rotation", label: "輪動", desc: "買超放緩", color: "#14b8a6" };
+  if (row.flow < 0 && row.accel >= 0) return { key: "watch", label: "觀望", desc: "賣超收斂", color: "#f59e0b" };
+  return { key: "ebb", label: "退潮", desc: "賣超加速", color: "#ef4444" };
+}
+function getSectorOffsetMax() {
+  const usable = sectorState.records
+    .map((record) => Math.max(0, ((record.a.sectorHistory || []).length - 21)))
+    .filter((value) => Number.isFinite(value));
+  return usable.length ? Math.min(19, Math.min(...usable)) : 0;
+}
+function sectorPointAt(record, offset) {
+  const history = record.a.sectorHistory || [];
+  const index = history.length - 1 - offset;
+  if (index < 20) return null;
+  const current = history[index];
+  const recent = history.slice(index - 4, index + 1);
+  const prior = history.slice(index - 19, index - 4);
+  if (recent.length < 5 || prior.length < 10 || !current || !current.close) return null;
+  const flow = sumNumbers(recent.map((item) => item.inst));
+  const accel = avgNumbers(recent.map((item) => item.inst)) - avgNumbers(prior.map((item) => item.inst));
+  const base = history[index - 20] && history[index - 20].close;
+  return {
+    code: record.a.code,
+    name: record.a.name,
+    cat: record.cat,
+    date: current.date,
+    flow,
+    accel,
+    ret20: base ? (current.close - base) / base * 100 : 0,
+    vol: avgNumbers(history.slice(index - 19, index + 1).map((item) => item.volume)) / 1000,
+  };
+}
+function getSectorRows(offset) {
+  const points = sectorState.records.map((record) => sectorPointAt(record, offset)).filter(Boolean);
+  if (!points.length) return [];
+  const requested = $("sec-view").value || "auto";
+  const categoryCount = new Set(points.map((point) => point.cat || "未分類")).size;
+  const mode = requested === "auto" ? (categoryCount >= 3 ? "group" : "stock") : requested;
+  const buckets = new Map();
+  for (const point of points) {
+    const key = mode === "stock" ? point.code : (point.cat || "未分類");
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(point);
+  }
+  return Array.from(buckets.entries()).map(([key, members]) => {
+    const volume = sumNumbers(members.map((member) => member.vol));
+    const weights = members.map((member) => member.vol > 0 ? member.vol : 1);
+    const weight = sumNumbers(weights);
+    const ret20 = sumNumbers(members.map((member, index) => member.ret20 * weights[index])) / weight;
+    const row = {
+      key: mode + "|" + key,
+      label: mode === "stock" ? members[0].name : key,
+      mode,
+      n: members.length,
+      date: members[0].date,
+      flow: sumNumbers(members.map((member) => member.flow)),
+      accel: sumNumbers(members.map((member) => member.accel)),
+      ret20,
+      vol: volume,
+      members: members.slice().sort((a, b) => b.flow - a.flow),
+    };
+    row.phase = sectorPhase(row);
+    return row;
+  }).sort((a, b) => b.flow - a.flow);
+}
+function setSectorControls(rows, maxOffset) {
+  const hasRows = rows.length > 0;
+  $("sec-view").disabled = !hasRows;
+  $("sec-buy-only").disabled = !hasRows;
+  $("btn-sector-play").disabled = !hasRows || maxOffset === 0;
+  $("sec-offset").disabled = !hasRows || maxOffset === 0;
+  $("sec-offset").max = String(maxOffset);
+  $("sec-offset").value = String(sectorState.offset);
+  const date = rows[0] && rows[0].date;
+  $("sec-date").textContent = date ? date + (sectorState.offset ? " · " + sectorState.offset + " 個交易日前" : " · 最新") : "尚未掃描";
+}
+function renderSectorInsight(rows) {
+  const phases = [
+    { key: "tide", title: "漲潮", text: "買超加速" },
+    { key: "rotation", title: "輪動", text: "買超放緩" },
+    { key: "watch", title: "觀望", text: "賣超收斂" },
+    { key: "ebb", title: "退潮", text: "賣超加速" },
+  ];
+  $("sector-insight").innerHTML = rows.length ? phases.map((phase) => {
+    const members = rows.filter((row) => row.phase.key === phase.key).sort((a, b) => Math.abs(b.flow) - Math.abs(a.flow));
+    const lead = members[0];
+    return '<div class="sector-kpi ' + phase.key + '"><span class="muted">' + phase.title + " · " + phase.text + '</span><b>' +
+      (lead ? esc(lead.label) + " " + signedLots(lead.flow) + " 張" : "暫無") +
+      '</b><span class="muted">' + members.length + " 個" + (lead ? " · 20日 " + (lead.ret20 >= 0 ? "+" : "") + fmtNum(lead.ret20, 1) + "%" : "") + "</span></div>";
+  }).join("") : "";
+}
+function showSectorTooltip(row) {
+  const tooltip = $("sector-tooltip");
+  if (!tooltip) return;
+  tooltip.hidden = false;
+  tooltip.innerHTML = '<b>' + esc(row.label) + '</b><span class="pill ' + (row.flow >= 0 ? "good" : "bad") + '">' + esc(row.phase.label) + " · " + esc(row.phase.desc) + '</span>' +
+    '<div class="kv" style="margin-top:7px"><span class="muted">近 5 日法人</span><span class="num ' + (row.flow >= 0 ? "up" : "down") + '">' + signedLots(row.flow) + ' 張</span>' +
+    '<span class="muted">法人加速度</span><span class="num ' + (row.accel >= 0 ? "up" : "down") + '">' + signedLots(row.accel, 1) + ' 張/日</span>' +
+    '<span class="muted">20 日漲跌</span><span class="num ' + (row.ret20 >= 0 ? "up" : "down") + '">' + (row.ret20 >= 0 ? "+" : "") + fmtNum(row.ret20, 1) + '%</span>' +
+    '<span class="muted">組成</span><span>' + row.n + ' 檔 · 點擊查看明細</span></div>';
+}
+function hideSectorTooltip() { const tooltip = $("sector-tooltip"); if (tooltip) tooltip.hidden = true; }
+function selectSectorRow(key) {
+  sectorState.selectedKey = sectorState.selectedKey === key ? null : key;
+  renderSectorMap();
+}
+function drawSector(host, rows) {
+  if (!host) return;
+  hideSectorTooltip();
+  if (!rows.length) {
+    host.innerHTML = '<div class="alert" style="margin:12px">沒有符合目前條件的資料；可以取消「只看法人淨買」或重新掃描。</div>';
+    return;
+  }
+  const buyOnly = $("sec-buy-only").checked;
+  const visible = rows.filter((row) => !buyOnly || row.flow >= 0);
+  if (!visible.length) {
+    host.innerHTML = '<div class="alert" style="margin:12px">目前沒有法人淨買的項目，取消篩選即可看完整地圖。</div>';
+    return;
+  }
+  const width = 1000, height = 430, left = 86, right = 38, top = 38, bottom = 58;
+  const xMax = Math.max(1, ...visible.map((row) => Math.abs(row.flow))) * 1.18;
+  const yMax = Math.max(1, ...visible.map((row) => Math.abs(row.accel))) * 1.28;
+  const X = (value) => left + (value + xMax) / (xMax * 2) * (width - left - right);
+  const Y = (value) => top + (1 - (value + yMax) / (yMax * 2)) * (height - top - bottom);
+  const xZero = X(0), yZero = Y(0);
+  const maxVol = Math.max(1, ...visible.map((row) => row.vol));
+  const trunc = (value, max = 9) => value.length > max ? value.slice(0, max - 1) + "…" : value;
+  let svg = '<svg viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="xMidYMid meet" aria-label="資金動能四象限地圖">';
+  svg += '<rect x="' + xZero + '" y="' + top + '" width="' + (width - right - xZero) + '" height="' + (yZero - top) + '" fill="rgba(37,99,235,.06)" />';
+  svg += '<rect x="' + xZero + '" y="' + yZero + '" width="' + (width - right - xZero) + '" height="' + (height - bottom - yZero) + '" fill="rgba(20,184,166,.06)" />';
+  svg += '<rect x="' + left + '" y="' + top + '" width="' + (xZero - left) + '" height="' + (yZero - top) + '" fill="rgba(245,158,11,.06)" />';
+  svg += '<rect x="' + left + '" y="' + yZero + '" width="' + (xZero - left) + '" height="' + (height - bottom - yZero) + '" fill="rgba(239,68,68,.06)" />';
+  for (let tick = -2; tick <= 2; tick++) {
+    const xv = xMax * tick / 2, yv = yMax * tick / 2;
+    svg += '<line class="sector-grid" x1="' + X(xv) + '" y1="' + top + '" x2="' + X(xv) + '" y2="' + (height - bottom) + '" />';
+    svg += '<line class="sector-grid" x1="' + left + '" y1="' + Y(yv) + '" x2="' + (width - right) + '" y2="' + Y(yv) + '" />';
+    svg += '<text class="sector-tick" x="' + X(xv) + '" y="' + (height - bottom + 20) + '" text-anchor="middle">' + esc(fmtLots(xv)) + '</text>';
+    if (tick !== 0) svg += '<text class="sector-tick" x="' + (left - 10) + '" y="' + (Y(yv) + 4) + '" text-anchor="end">' + esc(fmtLots(yv, 1)) + '</text>';
+  }
+  svg += '<line class="sector-axis" x1="' + xZero + '" y1="' + top + '" x2="' + xZero + '" y2="' + (height - bottom) + '" />';
+  svg += '<line class="sector-axis" x1="' + left + '" y1="' + yZero + '" x2="' + (width - right) + '" y2="' + yZero + '" />';
+  svg += '<text class="sector-quadrant-label" x="' + (xZero + 12) + '" y="' + (top + 22) + '">漲潮 · 買超加速</text>';
+  svg += '<text class="sector-quadrant-label" x="' + (xZero + 12) + '" y="' + (height - bottom - 12) + '">輪動 · 買超放緩</text>';
+  svg += '<text class="sector-quadrant-label" x="' + (left + 12) + '" y="' + (top + 22) + '">觀望 · 賣超收斂</text>';
+  svg += '<text class="sector-quadrant-label" x="' + (left + 12) + '" y="' + (height - bottom - 12) + '">退潮 · 賣超加速</text>';
+  svg += '<text class="sector-axis-title" x="' + ((left + width - right) / 2) + '" y="' + (height - 14) + '" text-anchor="middle">← 法人賣超　近 5 日法人淨買賣超（張）　法人買超 →</text>';
+  svg += '<text class="sector-axis-title" transform="translate(22 ' + ((top + height - bottom) / 2) + ') rotate(-90)" text-anchor="middle">法人加速度（近 5 日相對前 15 日，張／日）</text>';
+  visible.forEach((row) => {
+    const radius = 11 + 28 * Math.sqrt(Math.max(0, row.vol) / maxVol);
+    const x = X(row.flow), y = Y(row.accel);
+    const selected = sectorState.selectedKey === row.key ? " selected" : "";
+    svg += '<g class="sector-bubble' + selected + '" data-sector-key="' + esc(row.key) + '" role="button" tabindex="0" aria-label="' + esc(row.label + "，" + row.phase.label + "，法人 " + signedLots(row.flow) + " 張") + '">';
+    svg += '<title>' + esc(row.label + " · " + row.phase.label + " · 法人 " + signedLots(row.flow) + " 張") + '</title>';
+    svg += '<circle cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + row.phase.color + '" fill-opacity=".72" />';
+    svg += '<text class="sector-bubble-label" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y - 2) + '">' + esc(trunc(row.label)) + '</text>';
+    svg += '<text class="sector-bubble-value" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y + 14) + '">' + esc(signedLots(row.flow) + " 張") + '</text></g>';
+  });
+  svg += '</svg>';
+  host.innerHTML = svg;
+  host.querySelectorAll("[data-sector-key]").forEach((el) => {
+    const row = rows.find((item) => item.key === el.getAttribute("data-sector-key"));
+    if (!row) return;
+    el.addEventListener("pointerenter", () => showSectorTooltip(row));
+    el.addEventListener("pointerleave", hideSectorTooltip);
+    el.addEventListener("click", () => selectSectorRow(row.key));
+    el.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectSectorRow(row.key); } });
+  });
+}
+function renderSectorDetail(rows) {
+  const host = $("sector-detail");
+  const selected = rows.find((row) => row.key === sectorState.selectedKey);
+  if (!selected) {
+    host.innerHTML = rows.length ? '<p class="muted" style="font-size:12.5px">點擊任一泡泡或下方名稱，可展開組成個股與法人流向。</p>' : "";
+    return;
+  }
+  const members = selected.members.slice().sort((a, b) => Math.abs(b.flow) - Math.abs(a.flow));
+  host.innerHTML = '<div class="sector-detail-panel"><div class="row" style="justify-content:space-between"><div><h3>' + esc(selected.label) + '</h3><p class="sub" style="margin:0">' + esc(selected.phase.label + " · " + selected.phase.desc) + " · " + selected.n + ' 檔組成</p></div><button type="button" class="ghost" id="btn-sector-detail-close">收合</button></div>' +
+    '<div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>個股</th><th>20 日漲跌</th><th>法人 5 日（張）</th><th>加速度（張/日）</th><th></th></tr></thead><tbody>' +
+    members.map((member) => '<tr><td><b>' + esc(member.name) + '</b> <span class="muted num">' + esc(member.code) + '</span></td>' +
+      '<td class="num ' + (member.ret20 >= 0 ? "up" : "down") + '">' + (member.ret20 >= 0 ? "+" : "") + fmtNum(member.ret20, 1) + '%</td>' +
+      '<td class="num ' + (member.flow >= 0 ? "up" : "down") + '">' + signedLots(member.flow) + '</td>' +
+      '<td class="num ' + (member.accel >= 0 ? "up" : "down") + '">' + signedLots(member.accel, 1) + '</td>' +
+      '<td><button class="sector-link" type="button" data-sector-open="' + esc(member.code) + '">診斷</button> · <button class="sector-link" type="button" data-sector-watch="' + esc(member.code) + '">追蹤</button></td></tr>').join("") +
+    '</tbody></table></div></div>';
+  $("btn-sector-detail-close").addEventListener("click", () => { sectorState.selectedKey = null; renderSectorMap(); });
+  host.querySelectorAll("[data-sector-open]").forEach((button) => button.addEventListener("click", () => { doAnalyze(button.getAttribute("data-sector-open")); switchTab("stock"); }));
+  host.querySelectorAll("[data-sector-watch]").forEach((button) => button.addEventListener("click", () => {
+    const code = button.getAttribute("data-sector-watch");
+    const member = members.find((item) => item.code === code);
+    if (member) { toggleWatch(member.code, member.name); renderWatch(); button.textContent = "已追蹤"; }
+  }));
+}
+function renderSectorTable(rows) {
+  $("sector-result").innerHTML = rows.length ? '<div class="table-wrap"><table><thead><tr><th>板塊／個股</th><th>階段</th><th>檔數</th><th>20 日漲跌</th><th>法人 5 日（張）</th><th>加速度（張/日）</th><th>近 20 日均量（張）</th></tr></thead><tbody>' +
+    rows.map((row) => '<tr><td><button class="sector-link" type="button" data-sector-select="' + esc(row.key) + '">' + esc(row.label) + '</button></td>' +
+      '<td><span class="pill ' + (row.flow >= 0 ? "good" : "bad") + '">' + esc(row.phase.label) + '</span></td><td class="num">' + row.n + '</td>' +
+      '<td class="num ' + (row.ret20 >= 0 ? "up" : "down") + '">' + (row.ret20 >= 0 ? "+" : "") + fmtNum(row.ret20, 1) + '%</td>' +
+      '<td class="num ' + (row.flow >= 0 ? "up" : "down") + '">' + signedLots(row.flow) + '</td>' +
+      '<td class="num ' + (row.accel >= 0 ? "up" : "down") + '">' + signedLots(row.accel, 1) + '</td>' +
+      '<td class="num">' + fmtLots(row.vol) + '</td></tr>').join("") + '</tbody></table></div>' : "";
+  $("sector-result").querySelectorAll("[data-sector-select]").forEach((button) => button.addEventListener("click", () => selectSectorRow(button.getAttribute("data-sector-select"))));
+}
+function renderSectorMap() {
+  const maxOffset = getSectorOffsetMax();
+  sectorState.offset = Math.min(Math.max(0, sectorState.offset), maxOffset);
+  const rows = getSectorRows(sectorState.offset);
+  if (!rows.some((row) => row.key === sectorState.selectedKey)) sectorState.selectedKey = null;
+  sectorState.rows = rows;
+  setSectorControls(rows, maxOffset);
+  renderSectorInsight(rows);
+  drawSector($("sector-chart"), rows);
+  renderSectorDetail(rows);
+  renderSectorTable(rows);
+}
+function stopSectorReplay() {
+  if (sectorReplayTimer) clearInterval(sectorReplayTimer);
+  sectorReplayTimer = null;
+  const button = $("btn-sector-play");
+  if (button) button.textContent = "播放 20 日回放";
+}
+function toggleSectorReplay() {
+  if (!sectorState.records.length) return;
+  if (sectorReplayTimer) { stopSectorReplay(); return; }
+  const maxOffset = getSectorOffsetMax();
+  if (!maxOffset) return;
+  if (sectorState.offset === 0) sectorState.offset = maxOffset;
+  $("btn-sector-play").textContent = "暫停回放";
+  renderSectorMap();
+  sectorReplayTimer = setInterval(() => {
+    if (sectorState.offset <= 0) { stopSectorReplay(); return; }
+    sectorState.offset -= 1;
+    renderSectorMap();
+  }, 700);
+}
 async function doSector() {
   if (secScanning) return;
   const poolSel = $("sec-pool").value;
   const pool = poolCodes(poolSel);
   if (!pool.length) { $("sec-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : poolSel === "watch" ? "追蹤清單是空的，先到個股診斷加入。" : "「" + poolLabel(poolSel) + "」沒有成分，請換一個股票池。"; return; }
+  stopSectorReplay();
+  sectorState = { records: [], offset: 0, selectedKey: null, rows: [] };
   secScanning = true;
   $("btn-sector").disabled = true;
+  $("sec-view").disabled = true;
+  $("sec-buy-only").disabled = true;
+  $("btn-sector-play").disabled = true;
+  $("sec-offset").disabled = true;
+  $("sec-offset").value = "0";
+  $("sec-date").textContent = "掃描中";
+  $("sector-insight").innerHTML = "";
+  $("sector-detail").innerHTML = "";
   $("sector-result").innerHTML = "";
-  const groups = {};
+  $("sector-chart").innerHTML = '<p class="muted" style="padding:16px">建立資金動能地圖中…</p>';
   let ok = 0, fail = 0;
+  await loadInfoMap(false);
   for (let idx = 0; idx < pool.length; idx++) {
     const code = pool[idx];
     $("sec-status").textContent = "掃描中 " + (idx + 1) + " / " + pool.length + "（成功 " + ok + "，失敗 " + fail + "）";
@@ -1077,87 +1345,19 @@ async function doSector() {
     try {
       const a = await analyze(code);
       ok++;
-      await loadInfoMap(false);
-      const cat = infoOf(code).industry_category || "未分類";
-      const closes = a.closes;
-      const base = closes[Math.max(0, closes.length - 21)] || closes[0];
-      const ret20 = base ? (closes[closes.length - 1] - base) / base * 100 : 0;
-      const inst5 = (a.f5 + a.t5 + a.d5) / 1000; // 張
-      groups[cat] = groups[cat] || { cat, ret: [], inst: [], vol: [], members: [] };
-      groups[cat].ret.push(ret20);
-      groups[cat].inst.push(inst5);
-      groups[cat].vol.push(a.volume);
-      groups[cat].members.push({ code, name: a.name, ret20, inst5 });
-      renderSector(groups);
+      sectorState.records.push({ a, cat: infoOf(code).industry_category || "未分類" });
+      renderSectorMap();
     } catch (e) { fail++; }
     await sleep(350);
   }
   $("sec-bar").style.width = "100%";
-  $("sec-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "，涵蓋 " + Object.keys(groups).length + " 個板塊。點下方表格代號可載入個股診斷。";
+  const actualMode = sectorState.rows[0] && sectorState.rows[0].mode;
+  const view = $("sec-view").value === "auto"
+    ? (actualMode === "stock" ? "智慧呈現（個股）" : "智慧呈現（產業板塊）")
+    : $("sec-view").selectedOptions[0].text;
+  $("sec-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "。目前為「" + view + "」，可切換呈現方式、點泡泡下鑽或播放回放。";
   secScanning = false;
   $("btn-sector").disabled = false;
-}
-function renderSector(groups) {
-  const rows = Object.values(groups).map((g) => ({
-    cat: g.cat,
-    n: g.members.length,
-    ret: g.ret.reduce((s, v) => s + v, 0) / Math.max(1, g.ret.length),
-    inst: g.inst.reduce((s, v) => s + v, 0),
-    vol: g.vol.reduce((s, v) => s + v, 0) / Math.max(1, g.vol.length),
-    members: g.members.slice().sort((a, b) => b.inst5 - a.inst5).slice(0, 3),
-  })).sort((a, b) => b.inst - a.inst);
-  drawSector($("sector-chart"), rows);
-  $("sector-result").innerHTML = '<div class="table-wrap"><table><thead><tr><th>板塊</th><th>檔數</th><th>平均 20 日漲跌</th><th>法人 5 日合計（張）</th><th>均量（張）</th><th>代表個股</th></tr></thead><tbody>' +
-    rows.map((r) => "<tr><td>" + esc(r.cat) + "</td><td class='num'>" + r.n + "</td>" +
-      "<td class='num " + (r.ret >= 0 ? "up" : "down") + "'>" + (r.ret >= 0 ? "+" : "") + fmtNum(r.ret) + "%</td>" +
-      "<td class='num " + (r.inst >= 0 ? "up" : "down") + "'>" + fmtInt(r.inst) + "</td>" +
-      "<td class='num'>" + fmtInt(r.vol / 1000) + "</td>" +
-      "<td>" + r.members.map((m) => "<a href='#' data-c='" + esc(m.code) + "'>" + esc(m.name) + " " + esc(m.code) + "</a>").join(" · ") + "</td></tr>").join("") +
-    "</tbody></table></div>";
-  document.querySelectorAll("#sector-result a").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); doAnalyze(a.getAttribute("data-c")); switchTab("stock"); }));
-}
-function drawSector(canvas, rows) {
-  if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || 600, h = 320;
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
-  if (!rows.length) return;
-  const xs = rows.map((r) => r.ret), ys = rows.map((r) => r.inst);
-  let x0 = Math.min(...xs, 0), x1 = Math.max(...xs, 0);
-  let y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0);
-  if (x1 === x0) { x1 += 1; x0 -= 1; }
-  if (y1 === y0) { y1 += 1; y0 -= 1; }
-  const padL = 56, padR = 12, padT = 12, padB = 30;
-  const X = (v) => padL + (v - x0) / (x1 - x0) * (w - padL - padR);
-  const Y = (v) => padT + (1 - (v - y0) / (y1 - y0)) * (h - padT - padB);
-  const css = getComputedStyle(document.documentElement);
-  ctx.strokeStyle = css.getPropertyValue("--border") || "#ddd";
-  ctx.fillStyle = css.getPropertyValue("--muted") || "#888";
-  ctx.font = "11px sans-serif";
-  for (let g = 0; g <= 4; g++) {
-    const xv = x0 + (x1 - x0) * g / 4;
-    ctx.beginPath(); ctx.moveTo(X(xv), padT); ctx.lineTo(X(xv), h - padB); ctx.stroke();
-    ctx.fillText(fmtNum(xv, 1) + "%", X(xv) - 14, h - 12);
-  }
-  // 零軸
-  ctx.strokeStyle = "#8a94a6";
-  ctx.beginPath(); ctx.moveTo(X(0), padT); ctx.lineTo(X(0), h - padB); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(w - padR, Y(0)); ctx.stroke();
-  const vols = rows.map((r) => r.vol);
-  const vMax = Math.max(...vols);
-  const palette = ["#2563eb", "#c81e1e", "#15803d", "#b45309", "#7c3aed", "#0e7490", "#be185d", "#4d7c0f"];
-  rows.forEach((r, i) => {
-    const rad = 6 + 22 * Math.sqrt(r.vol / Math.max(1, vMax));
-    ctx.globalAlpha = 0.55;
-    ctx.fillStyle = palette[i % palette.length];
-    ctx.beginPath(); ctx.arc(X(r.ret), Y(r.inst), rad, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = css.getPropertyValue("--text") || "#000";
-    ctx.fillText(r.cat.slice(0, 6), X(r.ret) + rad + 3, Y(r.inst) + 4);
-  });
 }
 
 /* ---------- 追蹤 / 最近 ---------- */
@@ -1411,6 +1611,7 @@ function renderWatch() {
 
 /* ---------- 頁籤 / 主題 / 對話框 ---------- */
 function switchTab(name) {
+  if (name !== "sector") stopSectorReplay();
   document.querySelectorAll("nav.tabs button").forEach((b) => b.classList.toggle("active", b.getAttribute("data-tab") === name));
   $("tab-stock").hidden = name !== "stock";
   $("tab-scan").hidden = name !== "scan";
@@ -1445,7 +1646,7 @@ function methodHtml() {
     "<span class='muted'>候選比較</span><span>海選預設只顯示最終通過的標的；可切換看全部，再從結果中選 2–3 檔帶入比較。候選選取與追蹤清單皆只存在本機。</span>" +
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
-    "<span class='muted'>板塊</span><span>X 為 20 日漲跌、Y 為 5 日法人合計（張）、氣泡為均量；產業來自 FinMind 分類。</span>" +
+    "<span class='muted'>板塊地圖</span><span>資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。可切換產業／個股、只看淨買，並回放最近 20 個交易日。</span>" +
     "<span class='muted'>筆記</span><span>研究筆記只存本機 localStorage，跨裝置不會同步；僅供個人研究記錄。</span>" +
     "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件檢查，需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
     "<span class='muted'>動能 MD14</span><span>14 日漲跌幅，站穩為正；沿用原站口徑摘要。</span>" +
@@ -1505,6 +1706,24 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-dividend").addEventListener("click", doDividend);
   $("div-sort").addEventListener("change", () => { /* 下次渲染生效 */ });
   $("btn-sector").addEventListener("click", doSector);
+  $("sec-view").addEventListener("change", () => {
+    if (!sectorState.records.length) return;
+    stopSectorReplay();
+    sectorState.selectedKey = null;
+    renderSectorMap();
+  });
+  $("sec-buy-only").addEventListener("change", () => {
+    if (!sectorState.records.length) return;
+    sectorState.selectedKey = null;
+    renderSectorMap();
+  });
+  $("sec-offset").addEventListener("input", () => {
+    if (!sectorState.records.length) return;
+    stopSectorReplay();
+    sectorState.offset = Number($("sec-offset").value) || 0;
+    renderSectorMap();
+  });
+  $("btn-sector-play").addEventListener("click", toggleSectorReplay);
   $("btn-note-load").addEventListener("click", () => noteLoad());
   $("note-code").addEventListener("keydown", (e) => { if (e.key === "Enter") noteLoad(); });
   $("btn-note-save").addEventListener("click", noteSave);

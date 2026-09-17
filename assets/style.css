@@ -117,6 +117,12 @@ a { color: var(--brand-2); }
   .kv { grid-template-columns: 96px 1fr; }
   .matrix { grid-template-columns: 1fr; }
   .chart { height: 200px; }
+  .sector-toolbar { align-items: stretch; }
+  .sector-toolbar .row { width: 100%; }
+  .sector-toolbar select, .sector-toolbar input[type="range"] { flex: 1; }
+  .sector-map-shell { min-height: 330px; }
+  .sector-chart { min-height: 330px; }
+  .sector-insight { grid-template-columns: 1fr 1fr; }
   .scan-workbench { align-items: stretch; }
   .scan-workbench .row { width: 100%; }
   .scan-workbench .row button { flex: 1; }
@@ -215,6 +221,98 @@ thead th { background: var(--surface-2); font-size: 12px; color: var(--muted); }
 }
 .scan-card-actions { display: flex; gap: 7px; margin-top: 10px; }
 .scan-card-actions button { flex: 1; padding: 6px 8px; font-size: 12px; }
+.sector-toolbar {
+  margin-top: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.sector-toolbar input[type="range"] { accent-color: var(--brand-2); }
+.sector-insight {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.sector-kpi {
+  min-height: 74px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.sector-kpi b { display: block; margin-top: 2px; font-size: 14px; line-height: 1.3; }
+.sector-kpi.tide { border-color: #60a5fa; background: rgba(37, 99, 235, 0.08); }
+.sector-kpi.rotation { border-color: #2dd4bf; background: rgba(20, 184, 166, 0.08); }
+.sector-kpi.watch { border-color: #fbbf24; background: rgba(245, 158, 11, 0.08); }
+.sector-kpi.ebb { border-color: #f87171; background: rgba(239, 68, 68, 0.08); }
+.sector-map-shell {
+  position: relative;
+  min-height: 410px;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.sector-chart { min-height: 410px; }
+.sector-chart svg { display: block; width: 100%; height: auto; min-height: 410px; }
+.sector-grid { stroke: var(--border); stroke-width: 1; }
+.sector-axis { stroke: var(--muted); stroke-width: 1.5; }
+.sector-tick, .sector-axis-title { fill: var(--muted); font-size: 12px; font-family: var(--sans); }
+.sector-axis-title { font-size: 13px; font-weight: 700; }
+.sector-quadrant-label { fill: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .03em; }
+.sector-bubble { cursor: pointer; outline: none; }
+.sector-bubble circle { stroke: rgba(255,255,255,.8); stroke-width: 2; transition: opacity .18s, stroke-width .18s; }
+[data-theme="dark"] .sector-bubble circle { stroke: rgba(255,255,255,.34); }
+.sector-bubble:hover circle, .sector-bubble:focus circle, .sector-bubble.selected circle { stroke: var(--text); stroke-width: 3; }
+.sector-bubble.dimmed { opacity: .18; }
+.sector-bubble-label { fill: var(--text); font-size: 12px; font-weight: 700; pointer-events: none; }
+.sector-bubble-value { fill: var(--muted); font-size: 11px; pointer-events: none; }
+.sector-tooltip {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 12px;
+  max-width: min(290px, calc(100% - 24px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  pointer-events: none;
+}
+.sector-tooltip b { display: block; font-size: 13px; }
+.sector-detail {
+  margin-top: 12px;
+  min-height: 0;
+}
+.sector-detail-panel {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.sector-detail-panel h3 { margin: 0 0 4px; }
+.sector-link {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--brand-2);
+  font: inherit;
+  text-align: left;
+}
+.sector-link:hover, .sector-link:focus { text-decoration: underline; }
 .tag { display: inline-block; font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; margin: 1px 4px 1px 0; }
 .chart { width: 100%; height: 250px; }
 .foot { color: var(--muted); font-size: 12px; }

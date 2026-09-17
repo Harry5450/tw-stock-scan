@@ -244,9 +244,9 @@
     <div id="dividend-result" style="margin-top:12px"></div>
   </section>
 
-  <section class="card" id="tab-sector" hidden aria-label="板塊氣泡">
-    <h2>板塊氣泡圖</h2>
-    <p class="sub">X 軸：近 20 日漲跌幅（%）。Y 軸：近 5 日法人買賣超合計（外資＋投信＋自營，張）。氣泡大小：近 20 日均量。產業分類來自 FinMind TaiwanStockInfo，抓不到分類的個股歸入「未分類」。</p>
+  <section class="card" id="tab-sector" hidden aria-label="板塊資金動能地圖">
+    <h2>板塊資金動能地圖</h2>
+    <p class="sub">以 Tide 的「潮汐」讀法重新設計：越右＝近 5 日法人買越多；越上＝法人流向相對前 15 日轉強；泡泡越大＝近 20 日均量越大。若選的族群只屬同一產業，智慧呈現會自動切成個股，避免只剩一顆看不懂的泡泡。</p>
     <div class="row">
       <label for="sec-pool">股票池</label>
       <select id="sec-pool">
@@ -268,7 +268,29 @@
       <span class="muted" id="sec-status" style="font-size:12.5px"></span>
     </div>
     <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="sec-bar" style="width:0%"></i></div></div>
-    <canvas id="sector-chart" class="chart" style="height:320px;margin-top:12px"></canvas>
+    <div class="sector-toolbar" aria-label="板塊地圖控制項">
+      <div class="row">
+        <label for="sec-view">呈現</label>
+        <select id="sec-view" disabled>
+          <option value="auto">智慧呈現</option>
+          <option value="group">依產業板塊</option>
+          <option value="stock">依個股</option>
+        </select>
+        <label><input id="sec-buy-only" type="checkbox" disabled /> 只看法人淨買</label>
+      </div>
+      <div class="row">
+        <button id="btn-sector-play" type="button" disabled>播放 20 日回放</button>
+        <label for="sec-offset">回放</label>
+        <input id="sec-offset" type="range" min="0" max="0" value="0" disabled />
+        <span id="sec-date" class="pill">尚未掃描</span>
+      </div>
+    </div>
+    <div id="sector-insight" class="sector-insight" aria-live="polite"></div>
+    <div class="sector-map-shell" aria-live="polite">
+      <div id="sector-chart" class="sector-chart" role="img" aria-label="板塊資金動能地圖"></div>
+      <div id="sector-tooltip" class="sector-tooltip" hidden></div>
+    </div>
+    <div id="sector-detail" class="sector-detail"></div>
     <div id="sector-result" style="margin-top:12px"></div>
   </section>
 
