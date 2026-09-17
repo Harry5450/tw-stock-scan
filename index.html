@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>台股結構掃描 — 個股診斷與海選</title>
+<meta name="description" content="台股個股診斷：法人籌碼、技術指標、位置評分、結構掃描。資料來源 FinMind，僅供研究參考，不構成投資建議。" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <h1>台股結構掃描</h1>
+      <p>法人籌碼 · 技術結構 · 位置評分 · 資料來源 FinMind</p>
+    </div>
+    <div class="top-actions">
+      <button id="btn-token" type="button">API Token</button>
+      <button id="btn-method" type="button">方法說明</button>
+      <button id="btn-theme" type="button" aria-label="切換深淺色">深色</button>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="card" aria-label="搜尋">
+    <div class="row">
+      <label class="sr" for="q">股票代號或名稱</label>
+      <input id="q" type="text" placeholder="輸入代號或名稱，例如 2330 或 台積電" autocomplete="off" style="flex:2;min-width:220px" />
+      <button id="btn-analyze" class="primary" type="button">分析</button>
+      <button id="btn-refresh" type="button" title="清除快取重新抓取">重新抓取</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="muted" style="font-size:12.5px">熱門</span>
+      <span id="hot"></span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="muted" style="font-size:12.5px">最近</span>
+      <span id="recent"></span>
+      <span style="flex:1"></span>
+      <span class="muted" style="font-size:12.5px" id="quota-note"></span>
+    </div>
+    <div id="search-msg" class="muted" style="font-size:12.5px;margin-top:6px"></div>
+  </section>
+
+  <nav class="tabs" aria-label="功能頁籤">
+    <button type="button" data-tab="stock" class="active">個股診斷</button>
+    <button type="button" data-tab="scan">海選掃描</button>
+    <button type="button" data-tab="compare">多股比較</button>
+    <button type="button" data-tab="watch">追蹤清單</button>
+  </nav>
+
+  <section class="card" id="tab-stock" aria-label="個股診斷">
+    <div id="stock-head"><p class="muted">在上方輸入代號後按「分析」。首次載入約需數秒（需抓近一年日線與法人資料）。</p></div>
+    <div id="stock-body"></div>
+  </section>
+
+  <section class="card" id="tab-scan" hidden aria-label="海選掃描">
+    <h2>海選掃描</h2>
+    <p class="sub">批次掃描股票池，按結構條件篩選。掃描 50 檔約需 1–3 分鐘（FinMind 免費額度限制，已內建節流）。點卡片可直接載入個股診斷。</p>
+    <div class="row">
+      <label for="pool">股票池</label>
+      <select id="pool">
+        <option value="top50">市值前 50 大</option>
+        <option value="watch">我的追蹤清單</option>
+      </select>
+      <label for="mode">模式</label>
+      <select id="mode">
+        <option value="bottom">底部探測（跌深＋法人回補＋動能初現）</option>
+        <option value="macd">MACD 多方結構（六維度）</option>
+        <option value="oversold">碎骨區（超跌反彈候選）</option>
+        <option value="inst">法人連買（外資投信同站多方）</option>
+      </select>
+      <button id="btn-scan" class="primary" type="button">開始掃描</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label for="sort">排序</label>
+      <select id="sort">
+        <option value="score">依分數</option>
+        <option value="code">依代號</option>
+        <option value="inst">依法人連買</option>
+      </select>
+      <span class="muted" id="scan-status" style="font-size:12.5px"></span>
+    </div>
+    <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="scan-bar" style="width:0%"></i></div></div>
+    <div id="scan-result" class="stock-cards" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="tab-compare" hidden aria-label="多股比較">
+    <h2>多股比較（2–3 檔）</h2>
+    <p class="sub">六維度：綜合評分、外資連買、投信連買、RSI、KD、均線結構。</p>
+    <div class="row">
+      <input id="cmp" type="text" placeholder="例如 2330,2317,2454" style="flex:1;min-width:200px" />
+      <button id="btn-compare" class="primary" type="button">比較</button>
+    </div>
+    <div id="compare-result" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="tab-watch" hidden aria-label="追蹤清單">
+    <h2>追蹤清單</h2>
+    <p class="sub">存在這台裝置的瀏覽器（localStorage），換裝置不會同步。</p>
+    <div id="watch-list"></div>
+  </section>
+
+  <footer class="foot">
+    <p>資料來源：FinMind（TaiwanStockPrice、TaiwanStockInstitutionalInvestorsBuySell、TaiwanStockInfo）。未設定 Token 時以匿名額度查詢；可在右上設定個人 Token（只存本機）。指標皆由前端即時計算，公式見「方法說明」。內容僅供研究參考，不構成投資建議。 past performance 不代表未來。</p>
+    <p><a href="https://api.finmindtrade.com/" target="_blank" rel="noopener">FinMind 官網</a> · <a href="README.md" target="_blank" rel="noopener">部署說明</a></p>
+  </footer>
+</main>
+
+<dialog id="dlg-token">
+  <div class="dlg-body">
+    <h2 style="margin-top:0">FinMind API Token</h2>
+    <p class="sub">到 FinMind 官網用 Google 帳號免費註冊，複製 Token 貼到下面。只存在本機瀏覽器，不會上傳。免費帳戶每日約 600 次查詢。</p>
+    <input id="token-input" type="text" placeholder="貼上 Token（留空即清除）" style="width:100%" />
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button type="button" id="token-cancel">取消</button>
+      <button type="button" id="token-save" class="primary">儲存</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlg-method">
+  <div class="dlg-body">
+    <h2 style="margin-top:0">方法說明</h2>
+    <div id="method-body"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button type="button" id="method-close" class="primary">關閉</button>
+    </div>
+  </div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
