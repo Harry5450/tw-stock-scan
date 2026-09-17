@@ -636,6 +636,44 @@ async function divYieldFor(code) {
   } catch (e) { return 0; }
 }
 let lastScan = null; // { list, mode }：供「套用篩選」不重抓直接重算
+const scanSelected = new Set();
+
+function renderScanSummary(list) {
+  const total = list.length;
+  const modePass = list.filter((a) => a._modePass).length;
+  const passed = list.filter((a) => a._pass).length;
+  const filtered = Math.max(0, modePass - passed);
+  $("scan-summary").innerHTML = total ?
+    '<div class="summary-stat"><b class="num">' + total + '</b><span class="muted">已完成分析</span></div>' +
+    '<div class="summary-stat good"><b class="num">' + passed + '</b><span class="muted">最終通過</span></div>' +
+    '<div class="summary-stat"><b class="num">' + modePass + '</b><span class="muted">模式符合</span></div>' +
+    '<div class="summary-stat"><b class="num">' + filtered + '</b><span class="muted">被自訂篩選排除</span></div>' : '';
+}
+function renderScanWorkbench() {
+  const selected = Array.from(scanSelected);
+  $("scan-workbench").hidden = !lastScan || !lastScan.list.length;
+  $("scan-pick-count").textContent = "已選 " + selected.length + " / 3 檔";
+  $("btn-compare-picked").disabled = selected.length < 2;
+  $("btn-clear-picked").disabled = selected.length === 0;
+}
+function toggleScanPick(code) {
+  if (scanSelected.has(code)) scanSelected.delete(code);
+  else {
+    if (scanSelected.size >= 3) {
+      $("filter-msg").textContent = "比較最多選 3 檔，請先取消一檔。";
+      return;
+    }
+    scanSelected.add(code);
+  }
+  if (lastScan) renderScan(lastScan.list, lastScan.mode);
+}
+function comparePicked() {
+  const picks = lastScan ? lastScan.list.filter((a) => scanSelected.has(a.code)).map((a) => a.code) : [];
+  if (picks.length < 2) return;
+  $("cmp").value = picks.join(",");
+  switchTab("compare");
+  doCompare();
+}
 async function doScan() {
   if (scanning) return;
   const poolSel = $("pool").value;
@@ -652,6 +690,9 @@ async function doScan() {
   scanning = true;
   $("btn-scan").disabled = true;
   $("scan-result").innerHTML = "";
+  $("scan-summary").innerHTML = "";
+  scanSelected.clear();
+  $("scan-workbench").hidden = true;
   lastScan = { list: [], mode };
   let ok = 0, fail = 0;
   for (let idx = 0; idx < pool.length; idx++) {
@@ -704,30 +745,48 @@ async function applyFiltersToLastScan() {
 }
 function renderScan(list, mode) {
   const sort = $("sort").value;
-  const arr = list.slice().sort((x, y) => {
+  const showPassed = $("show-passed").checked;
+  const arr = list.filter((a) => !showPassed || a._pass).slice().sort((x, y) => {
     if (sort === "code") return x.code < y.code ? -1 : 1;
     if (sort === "inst") return (y.fStreak + y.tStreak) - (x.fStreak + x.tStreak);
+    if (sort === "momentum") return y.md14 - x.md14;
+    if (sort === "drawdown") return x.drawdown - y.drawdown;
     return y._scanScore - x._scanScore;
   });
-  const modeNow = $("mode").value;
-  $("scan-result").innerHTML = arr.map((a, idx) => {
+  const modeNow = mode;
+  renderScanSummary(list);
+  renderScanWorkbench();
+  $("scan-result").innerHTML = arr.length ? arr.map((a, idx) => {
     const dir = a.chg > 0 ? "up" : a.chg < 0 ? "down" : "";
     const extra = modeNow === "chipCycle"
       ? '<div class="muted" style="font-size:12px">籌碼階段：' + esc(CHIP_CYCLE_NAME[a._scanScore] || "—") + ' · ' + esc(a.flowQuad) + '</div>'
       : "";
     const filtNote = (a._filterBad && a._filterBad.length)
       ? '<div class="muted" style="font-size:12px">篩選排除：' + esc(a._filterBad.join("、")) + '</div>' : "";
-    return '<div class="stock-card" data-code="' + esc(a.code) + '" style="cursor:pointer' + (a._pass ? ";border-width:2px" : ";opacity:.82") + '">' +
+    const picked = scanSelected.has(a.code);
+    const watched = getWatch().some((x) => x.code === a.code);
+    return '<div class="stock-card' + (a._pass ? ' scan-pass' : '') + (picked ? ' scan-picked' : '') + '" data-code="' + esc(a.code) + '" style="cursor:pointer">' +
       '<div class="row" style="justify-content:space-between"><b>' + esc(a.name) + ' <span class="muted num">' + esc(a.code) + '</span></b>' +
       '<span class="score ' + dir + '">' + fmtNum(a._pass ? a.total : a._scanScore, 1) + '</span></div>' +
       '<div class="num ' + dir + '" style="font-size:20px;font-weight:700">' + fmtNum(a.last.close) + ' <span style="font-size:12px">' + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + '%</span></div>' +
       '<div style="margin:6px 0">' + verdictPill(a) + ' ' + (a._pass ? '<span class="pill good">通過</span>' : '<span class="pill">未通過</span>') + '</div>' +
       '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + extra + filtNote +
-      '<div class="muted" style="font-size:12px">第 ' + (idx + 1) + ' 名 · 點卡片看完整診斷</div></div>';
-  }).join("");
+      '<div class="scan-card-actions"><button type="button" data-a="pick" data-c="' + esc(a.code) + '">' + (picked ? '取消比較' : '加入比較') + '</button>' +
+      '<button type="button" data-a="watch" data-c="' + esc(a.code) + '">' + (watched ? '取消追蹤' : '加入追蹤') + '</button></div>' +
+      '<div class="muted" style="font-size:12px;margin-top:8px">第 ' + (idx + 1) + ' 名 · 點卡片看完整診斷</div></div>';
+  }).join("") : '<div class="alert">目前沒有通過標的。你可以調整模式或篩選條件，或取消「僅看通過」檢視全部分析結果。</div>';
   document.querySelectorAll("#scan-result .stock-card").forEach((el) => {
     el.addEventListener("click", () => doAnalyze(el.getAttribute("data-code")));
   });
+  document.querySelectorAll("#scan-result button").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const code = b.getAttribute("data-c");
+    if (b.getAttribute("data-a") === "pick") toggleScanPick(code);
+    if (b.getAttribute("data-a") === "watch") {
+      const a = lastScan && lastScan.list.find((x) => x.code === code);
+      if (a) { toggleWatch(code, a.name); renderWatch(); renderScan(lastScan.list, lastScan.mode); }
+    }
+  }));
 }
 
 /* ---------- 比較 ---------- */
@@ -1314,6 +1373,7 @@ function methodHtml() {
     "<span class='muted'>海選</span><span>底部探測看跌深＋法人回補＋動能；MACD 結構看六維度 ≥4；碎骨看超跌；法人連買看法人連續性。掃描有節流，大池請耐心等。</span>" +
     "<span class='muted'>族群池</span><span>半導體/AI/航運/鋼鐵/塑化/金融/電信/汽車零組件/食品/紡織為固定成分（已驗證可查，掃描前去重、上限 30 檔）。軍工、衛星等主題無公開固定成分，未列入。</span>" +
     "<span class='muted'>自訂篩選</span><span>掃描後以已算出的 RSI、MA20、法人連買過濾，不多打查詢；殖利率只對模式通過者補查（每檔多 2 次查詢）。條件存本機，下次開啟沿用。</span>" +
+    "<span class='muted'>候選比較</span><span>海選預設只顯示最終通過的標的；可切換看全部，再從結果中選 2–3 檔帶入比較。候選選取與追蹤清單皆只存在本機。</span>" +
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
     "<span class='muted'>板塊</span><span>X 為 20 日漲跌、Y 為 5 日法人合計（張）、氣泡為均量；產業來自 FinMind 分類。</span>" +
@@ -1360,7 +1420,13 @@ document.addEventListener("DOMContentLoaded", () => {
     $("filter-msg").textContent = "已清除篩選條件。";
     if (lastScan && lastScan.list.length) applyFiltersToLastScan();
   });
-  $("sort").addEventListener("change", () => { /* 下次渲染生效 */ });
+  $("sort").addEventListener("change", () => { if (lastScan && lastScan.list.length) renderScan(lastScan.list, lastScan.mode); });
+  $("show-passed").addEventListener("change", () => { if (lastScan && lastScan.list.length) renderScan(lastScan.list, lastScan.mode); });
+  $("btn-compare-picked").addEventListener("click", comparePicked);
+  $("btn-clear-picked").addEventListener("click", () => {
+    scanSelected.clear();
+    if (lastScan) renderScan(lastScan.list, lastScan.mode);
+  });
   $("btn-compare").addEventListener("click", doCompare);
   $("btn-backtest").addEventListener("click", doBacktest);
   $("bt-code").addEventListener("keydown", (e) => { if (e.key === "Enter") doBacktest(); });

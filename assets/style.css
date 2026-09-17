@@ -117,6 +117,9 @@ a { color: var(--brand-2); }
   .kv { grid-template-columns: 96px 1fr; }
   .matrix { grid-template-columns: 1fr; }
   .chart { height: 200px; }
+  .scan-workbench { align-items: stretch; }
+  .scan-workbench .row { width: 100%; }
+  .scan-workbench .row button { flex: 1; }
 }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 input[type="text"], select, textarea {
@@ -177,6 +180,8 @@ thead th { background: var(--surface-2); font-size: 12px; color: var(--muted); }
   padding: 12px;
   background: var(--surface);
 }
+.stock-card.scan-pass { border-color: var(--ok-border); }
+.stock-card.scan-picked { box-shadow: 0 0 0 2px var(--brand-2); }
 .stock-card .score {
   width: 54px; height: 54px; border-radius: 50%;
   display: grid; place-items: center;
@@ -184,6 +189,32 @@ thead th { background: var(--surface-2); font-size: 12px; color: var(--muted); }
   font-weight: 800;
 }
 .stock-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.scan-summary { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.summary-stat {
+  min-width: 110px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.summary-stat b { display: block; font-size: 17px; line-height: 1.25; }
+.summary-stat.good { background: var(--ok-bg); border-color: var(--ok-border); }
+.scan-workbench {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.scan-card-actions { display: flex; gap: 7px; margin-top: 10px; }
+.scan-card-actions button { flex: 1; padding: 6px 8px; font-size: 12px; }
 .tag { display: inline-block; font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; margin: 1px 4px 1px 0; }
 .chart { width: 100%; height: 250px; }
 .foot { color: var(--muted); font-size: 12px; }

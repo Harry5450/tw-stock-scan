@@ -99,10 +99,14 @@
         <option value="score">依分數</option>
         <option value="code">依代號</option>
         <option value="inst">依法人連買</option>
+        <option value="momentum">依 14 日動能</option>
+        <option value="drawdown">依低檔程度</option>
       </select>
+      <label><input type="checkbox" id="show-passed" checked /> 僅看通過</label>
       <span class="muted" id="scan-status" style="font-size:12.5px"></span>
     </div>
     <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="scan-bar" style="width:0%"></i></div></div>
+    <div id="scan-summary" class="scan-summary" aria-live="polite"></div>
     <div class="row" style="margin-top:8px">
       <span class="muted" style="font-size:12.5px">自訂篩選（掃描後過濾，不多耗額度；殖利率只對模式通過者補查）</span>
     </div>
@@ -128,6 +132,17 @@
       <input id="custom-pool" type="text" placeholder="例如 2330,2317,2454" style="flex:1;min-width:200px" />
       <button id="btn-pool-save" type="button">儲存自訂池</button>
       <span class="muted" id="pool-msg" style="font-size:12.5px"></span>
+    </div>
+    <div class="scan-workbench" id="scan-workbench" hidden>
+      <div>
+        <b>候選比較</b>
+        <span class="muted">從掃描結果選 2–3 檔，再看同一張比較表。</span>
+      </div>
+      <div class="row">
+        <span class="pill" id="scan-pick-count">已選 0 / 3 檔</span>
+        <button id="btn-compare-picked" class="primary" type="button" disabled>比較已選</button>
+        <button id="btn-clear-picked" class="ghost" type="button" disabled>清除選取</button>
+      </div>
     </div>
     <div id="scan-result" class="stock-cards" style="margin-top:12px"></div>
   </section>
