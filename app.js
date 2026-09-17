@@ -7,6 +7,8 @@ const FINMIND = "https://api.finmindtrade.com/api/v4/data";
 const LS_TOKEN = "twscan.finmind_token";
 const LS_WATCH = "twscan.watch";
 const LS_THEME = "twscan.theme";
+const LS_STOCK_INFO = "twscan.stock-info.v1";
+const STOCK_INFO_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TOP50 = ["2330","2317","2454","2308","2303","2881","2882","2891","2892","2886","2885","2884","5880","2880","2887","2002","1301","1303","1326","1216","2207","2603","2615","2618","2629","2412","3711","3034","3037","6669","2379","2382","2357","3231","3661","3443","2345","2356","2360","2395","2408","3008","6415","1590","2049","2105","2327","2376","2883","2889"];
 const HOT = [["2330","台積電"],["2317","鴻海"],["2454","聯發科"],["2303","聯電"],["2891","中信金"]];
@@ -47,17 +49,73 @@ function lsSet(k, data) {
 }
 const INFO_MAP = new Map(); // stock_id -> { industry_category, stock_name }
 let infoLoaded = false;
+let infoLoading = null;
+let infoLoadError = "";
+
+function normalizeCode(value) { return String(value || "").trim().toUpperCase(); }
+function isSecurityCode(value) { return /^\d{4,5}[A-Z]?$/.test(normalizeCode(value)); }
+
+function fillInfoMap(rows) {
+  // 同一代號可能有轉板歷程；官方資料以日期最新的一列為目前名稱與市場別。
+  const latest = new Map();
+  for (const r of rows || []) {
+    const code = normalizeCode(r && r.stock_id);
+    const name = String((r && r.stock_name) || "").trim();
+    if (!isSecurityCode(code) || !name) continue;
+    const date = String(r.date || "");
+    const prev = latest.get(code);
+    if (!prev || date >= prev.date) {
+      latest.set(code, { date, industry_category: r.industry_category || "未分類", stock_name: name });
+    }
+  }
+  INFO_MAP.clear();
+  latest.forEach((info, code) => INFO_MAP.set(code, {
+    industry_category: info.industry_category,
+    stock_name: info.stock_name,
+  }));
+}
+function restoreInfoMap() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_STOCK_INFO) || "");
+    if (!saved || !Array.isArray(saved.entries) || !Number.isFinite(saved.savedAt)) return false;
+    if (Date.now() - saved.savedAt > STOCK_INFO_CACHE_MS) return false;
+    INFO_MAP.clear();
+    for (const entry of saved.entries) {
+      const code = normalizeCode(entry && entry[0]);
+      const info = entry && entry[1];
+      if (code && info && info.stock_name) {
+        INFO_MAP.set(code, { industry_category: info.industry_category || "未分類", stock_name: String(info.stock_name) });
+      }
+    }
+    return INFO_MAP.size > 0;
+  } catch (e) { return false; }
+}
+function saveInfoMap() {
+  try {
+    localStorage.setItem(LS_STOCK_INFO, JSON.stringify({ savedAt: Date.now(), entries: Array.from(INFO_MAP.entries()) }));
+  } catch (e) { /* 儲存空間不足時仍保留本次頁面記憶體快取 */ }
+}
 async function loadInfoMap(force) {
   if (infoLoaded && !force) return INFO_MAP;
-  try {
-    const rows = await finmind("TaiwanStockInfo", "", "2025-01-01", fmtDate(new Date()), { force });
-    INFO_MAP.clear();
-    for (const r of rows || []) {
-      if (r && r.stock_id) INFO_MAP.set(String(r.stock_id), { industry_category: r.industry_category || "未分類", stock_name: r.stock_name || "" });
+  if (!force && restoreInfoMap()) { infoLoaded = true; return INFO_MAP; }
+  if (infoLoading) return infoLoading;
+  infoLoading = (async () => {
+    try {
+      // TaiwanStockInfo 是完整名錄，帶日期條件會得到空清單；需省略 data_id/start/end。
+      const rows = await finmind("TaiwanStockInfo", "", "", "", { force });
+      if (!rows.length) throw new Error("股名清單為空");
+      fillInfoMap(rows);
+      saveInfoMap();
+      infoLoaded = true;
+      infoLoadError = "";
+    } catch (e) {
+      infoLoadError = "正式股名資料暫時無法載入";
+    } finally {
+      infoLoading = null;
     }
-    infoLoaded = true;
-  } catch (e) { /* 失敗就沿用舊對照 */ }
-  return INFO_MAP;
+    return INFO_MAP;
+  })();
+  return infoLoading;
 }
 function infoOf(code) {
   const hit = INFO_MAP.get(String(code));
@@ -97,7 +155,10 @@ async function finmind(dataset, dataId, startDate, endDate, { force = false } = 
     const ls = lsGet(key);
     if (ls) { memCache.set(key, ls); return ls; }
   }
-  const params = new URLSearchParams({ dataset, data_id: dataId, start_date: startDate, end_date: endDate });
+  const params = new URLSearchParams({ dataset });
+  if (dataId) params.set("data_id", dataId);
+  if (startDate) params.set("start_date", startDate);
+  if (endDate) params.set("end_date", endDate);
   if (token) params.set("token", token);
   const res = await fetch(FINMIND + "?" + params.toString());
   if (!res.ok) throw new Error("FinMind HTTP " + res.status + "（" + dataset + "）");
@@ -202,13 +263,14 @@ async function resolveName(code, force) {
 }
 
 async function analyze(code, { force = false } = {}) {
-  code = String(code).trim();
-  if (!/^\d{4}[A-Z]?$/.test(code)) throw new Error("代號格式不正確：" + code);
+  code = normalizeCode(code);
+  if (!isSecurityCode(code)) throw new Error("代號格式不正確：" + code);
   const end = fmtDate(new Date());
   const start = fmtDate(addDays(new Date(), -420));
-  const [price, inst] = await Promise.all([
+  const [price, inst, name] = await Promise.all([
     finmind("TaiwanStockPrice", code, start, end, { force }),
     finmind("TaiwanStockInstitutionalInvestorsBuySell", code, start, end, { force }),
+    resolveName(code, force),
   ]);
   if (!price.length) throw new Error(code + " 查無股價資料（可能代號錯誤或已下市）");
   price.sort((a, b) => a.date < b.date ? -1 : 1);
@@ -282,8 +344,6 @@ async function analyze(code, { force = false } = {}) {
 
   const chg = last.close - prev.close;
   const pct = prev.close ? (chg / prev.close) * 100 : 0;
-  const name = await resolveName(code, force);
-
   // 布林通道位置
   const { mid: bbMid, up: bbUp, dn: bbDn } = boll(closes, 20, 2);
   const bbPos = (bbUp[i] !== null && bbDn[i] !== null && bbUp[i] !== bbDn[i])
@@ -525,27 +585,36 @@ function posText(a) {
 }
 
 /* ---------- 搜尋 ---------- */
+async function resolveSearchCode(raw, force) {
+  const input = String(raw || "").trim();
+  const code = normalizeCode(input);
+  if (isSecurityCode(code)) return code;
+
+  const builtIn = Object.entries(NAME_FALLBACK).find(([, name]) => name === input || input.includes(name));
+  if (builtIn) return builtIn[0];
+
+  await loadInfoMap(force);
+  const normalizedName = input.replace(/\s+/g, "").toLowerCase();
+  const matches = Array.from(INFO_MAP.entries()).filter(([, info]) =>
+    String(info.stock_name || "").replace(/\s+/g, "").toLowerCase() === normalizedName
+  );
+  if (matches.length === 1) return matches[0][0];
+  if (matches.length > 1) throw new Error("找到多檔同名商品，請改輸入股號");
+  throw new Error("查無此股名，請輸入正確股號或完整名稱");
+}
 async function doAnalyze(codeRaw, { force = false } = {}) {
-  const code = String(codeRaw || "").trim();
-  if (!code) { $("search-msg").textContent = "請先輸入代號。"; return; }
-  // 名稱轉代號
-  let target = code;
-  if (!/^\d/.test(code)) {
-    const hit = Object.entries(NAME_FALLBACK).find(([, n]) => n === code || code.includes(n));
-    if (hit) target = hit[0];
-    else {
-      // 試著用 FinMind 查：抓 TaiwanStockInfo 全表太貴，改提示
-      $("search-msg").textContent = "名稱不在內建對照，請改輸 4 碼代號。";
-      return;
-    }
-  }
+  const query = String(codeRaw || "").trim();
+  if (!query) { $("search-msg").textContent = "請先輸入代號或名稱。"; return; }
   $("btn-analyze").disabled = true;
-  $("search-msg").textContent = "抓取 " + target + " 資料中（約數秒）…";
   try {
+    const target = await resolveSearchCode(query, force);
+    $("search-msg").textContent = "抓取 " + target + " 資料並自動核對股名中（約數秒）…";
     const a = await analyze(target, { force });
-    $("search-msg").textContent = "";
     switchTab("stock");
     await renderStock(a);
+    $("search-msg").textContent = a.name === a.code
+      ? (infoLoadError || "已找到股價資料，但官方名錄未提供股名。")
+      : "";
   } catch (e) {
     $("search-msg").textContent = "查詢失敗：" + (e instanceof Error ? e.message : e);
   } finally {
@@ -824,12 +893,12 @@ async function doCompare() {
 /* ---------- 回測統計（MACD 金叉死叉） ---------- */
 async function doBacktest() {
   const raw = $("bt-code").value.trim() || ($("q").value.trim() || "2330");
-  let code = raw;
+  let code = normalizeCode(raw);
   if (!/^\d/.test(code)) {
     const hit = Object.entries(NAME_FALLBACK).find(([, n]) => n === code || code.includes(n));
     if (hit) code = hit[0];
   }
-  if (!/^\d{4}[A-Z]?$/.test(code)) { $("bt-status").textContent = "代號格式不正確：" + raw; return; }
+  if (!isSecurityCode(code)) { $("bt-status").textContent = "代號格式不正確：" + raw; return; }
   $("bt-status").textContent = "抓取 " + code + " 近一年半日線、計算訊號中…";
   $("backtest-result").innerHTML = "";
   try {
@@ -1099,13 +1168,13 @@ function poolCodes(sel) {
   if (sel === "custom") {
     try {
       const raw = localStorage.getItem(LS_POOL) || "";
-      return raw.split(/[,\s、;]+/).map((s) => s.trim()).filter((s) => /^\d{4}[A-Z]?$/.test(s)).slice(0, 100);
+      return raw.split(/[,\s、;]+/).map(normalizeCode).filter(isSecurityCode).slice(0, 100);
     } catch (e) { return []; }
   }
   if (sel && sel.indexOf("sector:") === 0) {
     const key = sel.slice(7);
     const pool = SECTOR_POOLS[key];
-    if (pool) return pool.codes.filter((c) => /^\d{4}[A-Z]?$/.test(c)).slice(0, 30);
+    if (pool) return pool.codes.filter(isSecurityCode).slice(0, 30);
     return [];
   }
   return TOP50.slice();
@@ -1400,7 +1469,10 @@ document.addEventListener("DOMContentLoaded", () => {
     memCache.clear();
     try {
       Object.keys(localStorage).filter((k) => k.indexOf(LS_PFX) === 0).forEach((k) => localStorage.removeItem(k));
+      localStorage.removeItem(LS_STOCK_INFO);
+      INFO_MAP.clear();
       infoLoaded = false;
+      infoLoadError = "";
     } catch (e) { /* 忽略 */ }
     if ($("q").value.trim()) doAnalyze($("q").value, { force: true });
   });
