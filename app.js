@@ -12,6 +12,21 @@ const TOP50 = ["2330","2317","2454","2308","2303","2881","2882","2891","2892","2
 const HOT = [["2330","台積電"],["2317","鴻海"],["2454","聯發科"],["2303","聯電"],["2891","中信金"]];
 const NAME_FALLBACK = {2330:"台積電",2317:"鴻海",2454:"聯發科",2308:"台達電",2303:"聯電",2881:"富邦金",2882:"國泰金",2891:"中信金",2892:"第一金",2886:"兆豐金",2885:"元大金",2884:"玉山金",5880:"合庫金",2412:"中華電",2603:"長榮",2002:"中鋼",1216:"統一",1301:"台塑",3711:"日月光投控",6669:"緯穎",2382:"廣達",2357:"華碩",3231:"緯創"};
 
+/* 產業族群池：固定成分（皆以 FinMind 日線驗證過可查），掃描前自動去重、最多 30 檔 */
+const SECTOR_POOLS = {
+  semi: { label: "半導體", codes: ["2330","2454","2303","2308","3711","2449","3034","3037","2379","3443","3661","3532","3264","2345","2356","2360","2395","2408","6415","2327"] },
+  ai: { label: "AI 伺服器", codes: ["2382","2357","3231","6669","3661","2327","2376","3017","2059","6668","2356","2317"] },
+  shipping: { label: "航運", codes: ["2603","2609","2610","2615","2618","2637","2605","2606","2612","2634"] },
+  steel: { label: "鋼鐵", codes: ["2002","2014","2027","2031","2034","2006","2013","2023"] },
+  petro: { label: "塑化", codes: ["1301","1303","1326","6505","1312","1314","1316","1710"] },
+  finance: { label: "金融", codes: ["2881","2882","2891","2892","2886","2885","2884","5880","2880","2887","2883","2889"] },
+  telecom: { label: "電信", codes: ["2412","4904","3045","4938","4977","2345"] },
+  auto: { label: "汽車零組件", codes: ["2207","2105","1319","1522","1524","1536","2201","2243"] },
+  food: { label: "食品", codes: ["1216","1227","1229","1231","1232","1702","1732","2912"] },
+  textile: { label: "紡織", codes: ["1402","1410","1434","1440","1444","1476","1477","4438"] },
+};
+const SECTOR_KEYS = Object.keys(SECTOR_POOLS);
+
 const memCache = new Map();
 const $ = (id) => document.getElementById(id);
 
@@ -323,8 +338,9 @@ async function analyze(code, { force = false } = {}) {
       }
     }
   } catch (e) { /* 大盤抓不到就留空 */ }
+  // 近一年現金股利殖利率：只在篩選需要時由呼叫端補查（省額度），此處預設 0
   return {
-    code, name, last, prev, chg, pct,
+    code, name, last, prev, chg, pct, divYield: 0,
     ma5: ma5[i], ma10: ma10[i], ma20: ma20[i], ma60: ma60[i],
     rsi: rsiArr[i], k: K[i], d: D[i], dif: dif[i], dea: dea[i], hist: hist[i],
     bias20, pos60, posY, drawdown,
@@ -598,16 +614,45 @@ function passMode(a, mode) {
   if (mode === "chipCycle") return true; // 全部顯示階段，依排序看
   return a.drawdown <= -7 && (a.f5 > 0 || a.t5 > 0 || a.hist > 0);
 }
+async function divYieldFor(code) {
+  // 近一年已公告現金股利合計 / 現價（%），失敗回 0；走 finmind 快取，當日重查不重扣額度
+  try {
+    const end = fmtDate(new Date());
+    const yearAgo = fmtDate(addDays(new Date(), -365));
+    const [divs, price] = await Promise.all([
+      finmind("TaiwanStockDividend", code, yearAgo, end, {}),
+      finmind("TaiwanStockPrice", code, fmtDate(addDays(new Date(), -10)), end, {}),
+    ]);
+    const seen = {};
+    for (const d of divs) {
+      const ex = d.CashExDividendTradingDate || "";
+      if (!ex || ex < yearAgo) continue;
+      const amt = Number(d.CashEarningsDistribution || 0) + Number(d.CashStatutorySurplus || 0);
+      if (!seen[ex] || amt > seen[ex]) seen[ex] = amt;
+    }
+    const sum = Object.keys(seen).reduce((s, k) => s + seen[k], 0);
+    const last = price.length ? price[price.length - 1] : null;
+    return (last && sum > 0) ? sum / last.close * 100 : 0;
+  } catch (e) { return 0; }
+}
+let lastScan = null; // { list, mode }：供「套用篩選」不重抓直接重算
 async function doScan() {
   if (scanning) return;
   const poolSel = $("pool").value;
   const mode = $("mode").value;
   const pool = poolCodes(poolSel);
-  if (!pool.length) { $("scan-status").textContent = poolSel === "custom" ? "自訂池是空的，請在下方輸入代號後儲存。" : "追蹤清單是空的，先到個股診斷加入。"; return; }
+  if (!pool.length) {
+    $("scan-status").textContent = poolSel === "custom" ? "自訂池是空的，請在下方輸入代號後儲存。"
+      : poolSel === "watch" ? "追蹤清單是空的，先到個股診斷加入。"
+      : "「" + poolLabel(poolSel) + "」沒有成分，請換一個股票池。";
+    return;
+  }
+  const filters = readFilterInputs();
+  const needYield = filters.yMin !== null && !isNaN(filters.yMin);
   scanning = true;
   $("btn-scan").disabled = true;
   $("scan-result").innerHTML = "";
-  const done = [];
+  lastScan = { list: [], mode };
   let ok = 0, fail = 0;
   for (let idx = 0; idx < pool.length; idx++) {
     const code = pool[idx];
@@ -617,18 +662,45 @@ async function doScan() {
       const a = await analyze(code);
       ok++;
       a._scanScore = scoreByMode(a, mode);
-      a._pass = passMode(a, mode);
-      done.push(a);
-      renderScan(done, mode);
+      a._modePass = passMode(a, mode);
+      // 殖利率只對「模式已通過」的補查，不通過的不多耗額度
+      if (needYield && a._modePass) a.divYield = await divYieldFor(code);
+      a._yieldFetched = needYield && a._modePass;
+      a._filterBad = filterFailReasons(a, filters);
+      a._pass = a._modePass && a._filterBad.length === 0;
+      lastScan.list.push(a);
+      renderScan(lastScan.list, mode);
     } catch (e) {
       fail++;
     }
     await sleep(350); // 節流，保護免費額度
   }
   $("scan-bar").style.width = "100%";
-  $("scan-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "，通過條件 " + done.filter((a) => a._pass).length + " 檔。";
+  const passed = lastScan.list.filter((a) => a._pass).length;
+  const filteredOut = lastScan.list.filter((a) => a._modePass && !a._pass).length;
+  $("scan-status").textContent = "完成：「" + poolLabel(poolSel) + "」共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail +
+    "，通過 " + passed + " 檔" + (filtersActive(filters) ? "（自訂篩選排除 " + filteredOut + " 檔）" : "") + "。";
   scanning = false;
   $("btn-scan").disabled = false;
+}
+async function applyFiltersToLastScan() {
+  const filters = readFilterInputs();
+  if (!lastScan || !lastScan.list.length) {
+    $("filter-msg").textContent = "篩選條件已儲存，下次掃描生效。";
+    return;
+  }
+  const needYield = filters.yMin !== null && !isNaN(filters.yMin);
+  let fetched = 0;
+  for (const a of lastScan.list) {
+    // 掃描後才加殖利率條件：只對模式通過但還沒查過殖利率的補查
+    if (needYield && a._modePass && !a._yieldFetched) { a.divYield = await divYieldFor(a.code); a._yieldFetched = true; fetched++; await sleep(300); }
+    if (!needYield) { /* 條件清空後沿用舊值即可 */ }
+    a._filterBad = filterFailReasons(a, filters);
+    a._pass = a._modePass && a._filterBad.length === 0;
+  }
+  renderScan(lastScan.list, lastScan.mode);
+  const passed = lastScan.list.filter((a) => a._pass).length;
+  $("filter-msg").textContent = "已套用" + (fetched ? "（補查 " + fetched + " 檔殖利率）" : "") + "：通過 " + passed + " / " + lastScan.list.length + " 檔。";
 }
 function renderScan(list, mode) {
   const sort = $("sort").value;
@@ -643,12 +715,14 @@ function renderScan(list, mode) {
     const extra = modeNow === "chipCycle"
       ? '<div class="muted" style="font-size:12px">籌碼階段：' + esc(CHIP_CYCLE_NAME[a._scanScore] || "—") + ' · ' + esc(a.flowQuad) + '</div>'
       : "";
+    const filtNote = (a._filterBad && a._filterBad.length)
+      ? '<div class="muted" style="font-size:12px">篩選排除：' + esc(a._filterBad.join("、")) + '</div>' : "";
     return '<div class="stock-card" data-code="' + esc(a.code) + '" style="cursor:pointer' + (a._pass ? ";border-width:2px" : ";opacity:.82") + '">' +
       '<div class="row" style="justify-content:space-between"><b>' + esc(a.name) + ' <span class="muted num">' + esc(a.code) + '</span></b>' +
       '<span class="score ' + dir + '">' + fmtNum(a._pass ? a.total : a._scanScore, 1) + '</span></div>' +
       '<div class="num ' + dir + '" style="font-size:20px;font-weight:700">' + fmtNum(a.last.close) + ' <span style="font-size:12px">' + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + '%</span></div>' +
       '<div style="margin:6px 0">' + verdictPill(a) + ' ' + (a._pass ? '<span class="pill good">通過</span>' : '<span class="pill">未通過</span>') + '</div>' +
-      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + extra +
+      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + extra + filtNote +
       '<div class="muted" style="font-size:12px">第 ' + (idx + 1) + ' 名 · 點卡片看完整診斷</div></div>';
   }).join("");
   document.querySelectorAll("#scan-result .stock-card").forEach((el) => {
@@ -960,6 +1034,7 @@ function drawSector(canvas, rows) {
 
 /* ---------- 追蹤 / 最近 ---------- */
 const LS_POOL = "twscan.custompool";
+const LS_FILTERS = "twscan.filters.v1";
 function poolCodes(sel) {
   if (sel === "watch") return getWatch().map((x) => x.code);
   if (sel === "custom") {
@@ -968,7 +1043,72 @@ function poolCodes(sel) {
       return raw.split(/[,\s、;]+/).map((s) => s.trim()).filter((s) => /^\d{4}[A-Z]?$/.test(s)).slice(0, 100);
     } catch (e) { return []; }
   }
+  if (sel && sel.indexOf("sector:") === 0) {
+    const key = sel.slice(7);
+    const pool = SECTOR_POOLS[key];
+    if (pool) return pool.codes.filter((c) => /^\d{4}[A-Z]?$/.test(c)).slice(0, 30);
+    return [];
+  }
   return TOP50.slice();
+}
+function poolLabel(sel) {
+  if (sel === "watch") return "追蹤清單";
+  if (sel === "custom") return "自訂池";
+  if (sel && sel.indexOf("sector:") === 0) {
+    const pool = SECTOR_POOLS[sel.slice(7)];
+    return pool ? pool.label + "族群" : sel;
+  }
+  return "市值前 50 大";
+}
+/* 自訂篩選：掃描後以已算出的欄位過濾，不多打查詢。條件全部留空 = 不過濾 */
+function getFilters() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_FILTERS) || "{}");
+    const num = (v) => (v === "" || v === undefined || v === null) ? null : Number(v);
+    return {
+      rsiMin: num(o.rsiMin), rsiMax: num(o.rsiMax),
+      yMin: num(o.yMin),
+      fDays: num(o.fDays),
+      above20: !!o.above20, below20: !!o.below20,
+    };
+  } catch (e) {
+    return { rsiMin: null, rsiMax: null, yMin: null, fDays: null, above20: false, below20: false };
+  }
+}
+function setFilters(o) { try { localStorage.setItem(LS_FILTERS, JSON.stringify(o)); } catch (e) { /* 忽略 */ } }
+function readFilterInputs() {
+  const v = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+  const o = {
+    rsiMin: v("f-rsi-min"), rsiMax: v("f-rsi-max"),
+    yMin: v("f-yield-min"),
+    fDays: v("f-inst-days"),
+    above20: !!(document.getElementById("f-above20") && document.getElementById("f-above20").checked),
+    below20: !!(document.getElementById("f-below20") && document.getElementById("f-below20").checked),
+  };
+  setFilters(o);
+  return getFilters();
+}
+function writeFilterInputs(f) {
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = (val === null || val === undefined) ? "" : String(val); };
+  set("f-rsi-min", f.rsiMin); set("f-rsi-max", f.rsiMax);
+  set("f-yield-min", f.yMin); set("f-inst-days", f.fDays);
+  const a = document.getElementById("f-above20"); if (a) a.checked = !!f.above20;
+  const b = document.getElementById("f-below20"); if (b) b.checked = !!f.below20;
+}
+function filterFailReasons(a, f) {
+  const bad = [];
+  if (f.rsiMin !== null && !isNaN(f.rsiMin) && (a.rsi === null || a.rsi < f.rsiMin)) bad.push("RSI 低於下限");
+  if (f.rsiMax !== null && !isNaN(f.rsiMax) && (a.rsi === null || a.rsi > f.rsiMax)) bad.push("RSI 高於上限");
+  if (f.yMin !== null && !isNaN(f.yMin) && ((a.divYield || 0) < f.yMin)) bad.push("殖利率不足");
+  if (f.fDays !== null && !isNaN(f.fDays) && f.fDays > 0 && !((a.fStreak >= f.fDays) || (a.tStreak >= f.fDays))) bad.push("法人連買不足");
+  if (f.above20 && !(a.ma20 && a.last.close > a.ma20)) bad.push("未站上 MA20");
+  if (f.below20 && !(a.ma20 && a.last.close < a.ma20)) bad.push("未跌破 MA20");
+  return bad;
+}
+function filtersActive(f) {
+  return (f.rsiMin !== null && !isNaN(f.rsiMin)) || (f.rsiMax !== null && !isNaN(f.rsiMax)) ||
+    (f.yMin !== null && !isNaN(f.yMin)) || (f.fDays !== null && !isNaN(f.fDays) && f.fDays > 0) ||
+    f.above20 || f.below20;
 }
 /* ---------- 研究筆記（localStorage） ---------- */
 const LS_NOTES = "twscan.notes.v1";
@@ -1171,6 +1311,8 @@ function methodHtml() {
     "<span class='muted'>位置</span><span>收盤在近 60 日與近一年高低區間的百分位，愈高愈接近壓力。</span>" +
     "<span class='muted'>六維度</span><span>MACD 柱狀、DIF/DEA、零軸、法人、均線、KD，各 0–1 分；法人雙買超最多 1.5 分，合計 6 分。</span>" +
     "<span class='muted'>海選</span><span>底部探測看跌深＋法人回補＋動能；MACD 結構看六維度 ≥4；碎骨看超跌；法人連買看法人連續性。掃描有節流，大池請耐心等。</span>" +
+    "<span class='muted'>族群池</span><span>半導體/AI/航運/鋼鐵/塑化/金融/電信/汽車零組件/食品/紡織為固定成分（已驗證可查，掃描前去重、上限 30 檔）。軍工、衛星等主題無公開固定成分，未列入。</span>" +
+    "<span class='muted'>自訂篩選</span><span>掃描後以已算出的 RSI、MA20、法人連買過濾，不多打查詢；殖利率只對模式通過者補查（每檔多 2 次查詢）。條件存本機，下次開啟沿用。</span>" +
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
     "<span class='muted'>板塊</span><span>X 為 20 日漲跌、Y 為 5 日法人合計（張）、氣泡為均量；產業來自 FinMind 分類。</span>" +
@@ -1209,6 +1351,14 @@ document.addEventListener("DOMContentLoaded", () => {
     $("pool-msg").textContent = n ? "已儲存 " + n + " 檔" : "已清空（格式：逗號或空白分隔的 4 碼代號）";
   });
   $("btn-scan").addEventListener("click", doScan);
+  writeFilterInputs(getFilters());
+  $("btn-filter-apply").addEventListener("click", () => { applyFiltersToLastScan(); });
+  $("btn-filter-clear").addEventListener("click", () => {
+    setFilters({});
+    writeFilterInputs(getFilters());
+    $("filter-msg").textContent = "已清除篩選條件。";
+    if (lastScan && lastScan.list.length) applyFiltersToLastScan();
+  });
   $("sort").addEventListener("change", () => { /* 下次渲染生效 */ });
   $("btn-compare").addEventListener("click", doCompare);
   $("btn-backtest").addEventListener("click", doBacktest);

@@ -69,6 +69,16 @@
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
         <option value="custom">自訂池</option>
+        <option value="sector:semi">半導體族群</option>
+        <option value="sector:ai">AI 伺服器族群</option>
+        <option value="sector:shipping">航運族群</option>
+        <option value="sector:steel">鋼鐵族群</option>
+        <option value="sector:petro">塑化族群</option>
+        <option value="sector:finance">金融族群</option>
+        <option value="sector:telecom">電信族群</option>
+        <option value="sector:auto">汽車零組件族群</option>
+        <option value="sector:food">食品族群</option>
+        <option value="sector:textile">紡織族群</option>
       </select>
       <label for="mode">模式</label>
       <select id="mode">
@@ -93,6 +103,24 @@
       <span class="muted" id="scan-status" style="font-size:12.5px"></span>
     </div>
     <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="scan-bar" style="width:0%"></i></div></div>
+    <div class="row" style="margin-top:8px">
+      <span class="muted" style="font-size:12.5px">自訂篩選（掃描後過濾，不多耗額度；殖利率只對模式通過者補查）</span>
+    </div>
+    <div class="row" style="margin-top:4px">
+      <label for="f-rsi-min">RSI ≥</label>
+      <input id="f-rsi-min" type="text" inputmode="decimal" placeholder="如 30" style="width:70px" />
+      <label for="f-rsi-max">RSI ≤</label>
+      <input id="f-rsi-max" type="text" inputmode="decimal" placeholder="如 70" style="width:70px" />
+      <label for="f-yield-min">殖利率 ≥ %</label>
+      <input id="f-yield-min" type="text" inputmode="decimal" placeholder="如 4" style="width:70px" />
+      <label for="f-inst-days">法人連買 ≥ 天</label>
+      <input id="f-inst-days" type="text" inputmode="numeric" placeholder="如 3" style="width:60px" />
+      <label><input type="checkbox" id="f-above20" /> 站上 MA20</label>
+      <label><input type="checkbox" id="f-below20" /> 跌破 MA20</label>
+      <button id="btn-filter-apply" type="button">套用篩選</button>
+      <button id="btn-filter-clear" class="ghost" type="button">清除</button>
+      <span class="muted" id="filter-msg" style="font-size:12.5px"></span>
+    </div>
     <div class="row" style="margin-top:8px">
       <label for="custom-pool">自訂池（最多 100 檔，逗號或空白分隔）</label>
     </div>
@@ -177,6 +205,16 @@
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
         <option value="custom">自訂池</option>
+        <option value="sector:semi">半導體族群</option>
+        <option value="sector:ai">AI 伺服器族群</option>
+        <option value="sector:shipping">航運族群</option>
+        <option value="sector:steel">鋼鐵族群</option>
+        <option value="sector:petro">塑化族群</option>
+        <option value="sector:finance">金融族群</option>
+        <option value="sector:telecom">電信族群</option>
+        <option value="sector:auto">汽車零組件族群</option>
+        <option value="sector:food">食品族群</option>
+        <option value="sector:textile">紡織族群</option>
       </select>
       <label for="div-sort">排序</label>
       <select id="div-sort">
@@ -200,6 +238,16 @@
         <option value="top50">市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
         <option value="custom">自訂池</option>
+        <option value="sector:semi">半導體族群</option>
+        <option value="sector:ai">AI 伺服器族群</option>
+        <option value="sector:shipping">航運族群</option>
+        <option value="sector:steel">鋼鐵族群</option>
+        <option value="sector:petro">塑化族群</option>
+        <option value="sector:finance">金融族群</option>
+        <option value="sector:telecom">電信族群</option>
+        <option value="sector:auto">汽車零組件族群</option>
+        <option value="sector:food">食品族群</option>
+        <option value="sector:textile">紡織族群</option>
       </select>
       <button id="btn-sector" class="primary" type="button">開始掃描</button>
       <span class="muted" id="sec-status" style="font-size:12.5px"></span>
