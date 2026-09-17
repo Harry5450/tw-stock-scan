@@ -1101,8 +1101,9 @@ function filterFailReasons(a, f) {
   if (f.rsiMax !== null && !isNaN(f.rsiMax) && (a.rsi === null || a.rsi > f.rsiMax)) bad.push("RSI 高於上限");
   if (f.yMin !== null && !isNaN(f.yMin) && ((a.divYield || 0) < f.yMin)) bad.push("殖利率不足");
   if (f.fDays !== null && !isNaN(f.fDays) && f.fDays > 0 && !((a.fStreak >= f.fDays) || (a.tStreak >= f.fDays))) bad.push("法人連買不足");
-  if (f.above20 && !(a.ma20 && a.last.close > a.ma20)) bad.push("未站上 MA20");
-  if (f.below20 && !(a.ma20 && a.last.close < a.ma20)) bad.push("未跌破 MA20");
+  // 站上/跌破同時勾選代表不限制方向，避免條件互斥導致全部排除
+  if (f.above20 && !f.below20 && !(a.ma20 && a.last.close > a.ma20)) bad.push("未站上 MA20");
+  if (f.below20 && !f.above20 && !(a.ma20 && a.last.close < a.ma20)) bad.push("未跌破 MA20");
   return bad;
 }
 function filtersActive(f) {
