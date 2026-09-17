@@ -51,6 +51,8 @@
     <button type="button" data-tab="dividend">除息雷達</button>
     <button type="button" data-tab="sector">板塊氣泡</button>
     <button type="button" data-tab="watch">追蹤清單</button>
+    <button type="button" data-tab="notes">研究筆記</button>
+    <button type="button" data-tab="alerts">警示日報</button>
   </nav>
 
   <section class="card" id="tab-stock" aria-label="個股診斷">
@@ -74,6 +76,10 @@
         <option value="macd">MACD 多方結構（六維度）</option>
         <option value="oversold">碎骨區（超跌反彈候選）</option>
         <option value="inst">法人連買（外資投信同站多方）</option>
+        <option value="marginWash">資減人走（籌碼淨化候選）</option>
+        <option value="breakout">突破結構（站上 MA20＋翻紅＋回補）</option>
+        <option value="foreignStrong">外盤強勢（近似：漲勢＋量能＋外資）</option>
+        <option value="chipCycle">籌碼週期階段（吸籌/拉升/出貨/洗盤）</option>
       </select>
       <button id="btn-scan" class="primary" type="button">開始掃描</button>
     </div>
@@ -100,12 +106,55 @@
 
   <section class="card" id="tab-compare" hidden aria-label="多股比較">
     <h2>多股比較（2–3 檔）</h2>
-    <p class="sub">六維度：綜合評分、外資連買、投信連買、RSI、KD、均線結構。</p>
+    <p class="sub">六維度＋布林、OBV、法人合計、大盤連動，共十列對照。</p>
     <div class="row">
       <input id="cmp" type="text" placeholder="例如 2330,2317,2454" style="flex:1;min-width:200px" />
       <button id="btn-compare" class="primary" type="button">比較</button>
     </div>
     <div id="compare-result" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="tab-notes" hidden aria-label="研究筆記">
+    <h2>研究筆記</h2>
+    <p class="sub">針對目前診斷的個股寫筆記，存在這台裝置（localStorage）。換裝置不會同步；僅供個人研究記錄。</p>
+    <div class="row">
+      <input id="note-code" type="text" placeholder="代號，例如 2330（留空則用目前診斷股）" style="flex:1;min-width:200px" />
+      <button id="btn-note-load" type="button">載入</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <textarea id="note-text" rows="6" placeholder="寫下你的觀察：進場條件、出場紀律、疑慮…" style="flex:1;min-width:240px"></textarea>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-note-save" class="primary" type="button">儲存筆記</button>
+      <button id="btn-note-clear" class="ghost" type="button">清空</button>
+      <span class="muted" id="note-msg" style="font-size:12.5px"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="note-search" type="text" placeholder="搜尋筆記關鍵字" style="flex:1;min-width:200px" />
+      <button id="btn-note-search" type="button">搜尋</button>
+    </div>
+    <div id="note-result" style="margin-top:8px"></div>
+  </section>
+
+  <section class="card" id="tab-alerts" hidden aria-label="警示與日報">
+    <h2>警示與日報</h2>
+    <p class="sub">以追蹤清單為對象，設定收盤條件（MACD 翻紅/翻空、KD 金叉死叉、站上/跌破 MA20、法人連買賣）。本機每 60 分鐘檢查一次（開著本頁時），觸發即在頁面提示；每日日報按鈕可一鍵產出追蹤清單今日摘要。提醒：關掉頁面就不會檢查，重要價位請以券商警示為準。</p>
+    <div class="row">
+      <label><input type="checkbox" id="al-macd-up" checked /> MACD 翻紅</label>
+      <label><input type="checkbox" id="al-macd-dn" checked /> MACD 翻空</label>
+      <label><input type="checkbox" id="al-kd-gold" checked /> KD 金叉</label>
+      <label><input type="checkbox" id="al-kd-dead" checked /> KD 死叉</label>
+      <label><input type="checkbox" id="al-above20" checked /> 站上 MA20</label>
+      <label><input type="checkbox" id="al-below20" checked /> 跌破 MA20</label>
+      <label><input type="checkbox" id="al-inst" checked /> 法人連 3 買/賣</label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-alert-check" class="primary" type="button">立即檢查</button>
+      <button id="btn-daily" type="button">產出今日日報</button>
+      <span class="muted" id="alert-msg" style="font-size:12.5px"></span>
+    </div>
+    <div id="alert-result" style="margin-top:12px"></div>
+    <div id="daily-result" style="margin-top:12px"></div>
   </section>
 
   <section class="card" id="tab-backtest" hidden aria-label="回測統計">
@@ -167,7 +216,7 @@
   </section>
 
   <footer class="foot">
-    <p>資料來源：FinMind（TaiwanStockPrice、TaiwanStockInstitutionalInvestorsBuySell、TaiwanStockInfo、TaiwanStockDividend）。未設定 Token 時以匿名額度查詢；可在右上設定個人 Token（只存本機）。指標皆由前端即時計算，公式見「方法說明」。內容僅供研究參考，不構成投資建議。 past performance 不代表未來。</p>
+    <p>資料來源：FinMind（TaiwanStockPrice、TaiwanStockInstitutionalInvestorsBuySell、TaiwanStockInfo、TaiwanStockDividend、TaiwanStockPER、TaiwanStockMonthRevenue、TaiwanStockNews；MA/RSI/KD/MACD/布林/OBV/動能/ biais 皆由前端即時計算，公式見「方法說明」）。法人賣超＋量縮＋破 MA20 之「資減人走」為結構近似值，非交易所融資券餘額明細（券商分點／千張大戶集保為付費資料，未納入）。未設定 Token 時以匿名額度查詢；可在右上設定個人 Token（只存本機）。內容僅供研究參考，不構成投資建議。Past performance 不代表未來績效。</p>
     <p><a href="https://api.finmindtrade.com/" target="_blank" rel="noopener">FinMind 官網</a> · <a href="README.md" target="_blank" rel="noopener">部署說明</a></p>
   </footer>
 </main>

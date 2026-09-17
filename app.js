@@ -155,6 +155,27 @@ function macd(closes) {
   const hist = dif.map((v, i) => (v - dea[i]) * 2);
   return { dif, dea, hist };
 }
+function boll(closes, n = 20, k = 2) {
+  const mid = ma(closes, n);
+  const up = new Array(closes.length).fill(null);
+  const dn = new Array(closes.length).fill(null);
+  for (let i = 0; i < closes.length; i++) {
+    if (i < n - 1) continue;
+    const win = closes.slice(i - n + 1, i + 1);
+    const m = win.reduce((s, v) => s + v, 0) / n;
+    const sd = Math.sqrt(win.reduce((s, v) => s + (v - m) * (v - m), 0) / n);
+    up[i] = m + k * sd; dn[i] = m - k * sd;
+  }
+  return { mid, up, dn };
+}
+function obv(closes, vols) {
+  const out = new Array(closes.length).fill(0);
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    out[i] = out[i - 1] + (d > 0 ? vols[i] : d < 0 ? -vols[i] : 0);
+  }
+  return out;
+}
 
 /* ---------- 分析 ---------- */
 async function resolveName(code, force) {
@@ -247,6 +268,61 @@ async function analyze(code, { force = false } = {}) {
   const chg = last.close - prev.close;
   const pct = prev.close ? (chg / prev.close) * 100 : 0;
   const name = await resolveName(code, force);
+
+  // 布林通道位置
+  const { mid: bbMid, up: bbUp, dn: bbDn } = boll(closes, 20, 2);
+  const bbPos = (bbUp[i] !== null && bbDn[i] !== null && bbUp[i] !== bbDn[i])
+    ? ((closes[i] - bbDn[i]) / (bbUp[i] - bbDn[i])) * 100 : 50;
+  const bbState = bbUp[i] === null ? "資料不足" : closes[i] > bbUp[i] ? "站上上軌（強勢延伸或短線過熱）" : closes[i] < bbDn[i] ? "跌破下軌（弱勢延伸或短線超賣）" : "軌道內運行";
+  // OBV 方向：近 5 日斜率
+  const obvLine = obv(closes, vols);
+  const obv5 = obvLine[i] - obvLine[Math.max(0, i - 5)];
+  const obvState = obv5 > 0 ? "近 5 日資金淨流入（OBV 上行）" : obv5 < 0 ? "近 5 日資金淨流出（OBV 下行）" : "OBV 持平";
+  // 動能條：沿用原站口徑摘要
+  const md14 = closes[i] && closes[Math.max(0, i - 14)] ? (closes[i] - closes[Math.max(0, i - 14)]) / closes[Math.max(0, i - 14)] * 100 : 0;
+  // 籌碼流體四象限：法人 5 日合計 vs 20 日漲跌
+  const base20 = closes[Math.max(0, i - 20)] || closes[0];
+  const ret20 = base20 ? (closes[i] - base20) / base20 * 100 : 0;
+  const instFlow = (sum5("foreign") + sum5("trust") + sum5("dealer")) / 1000;
+  const flowQuad = instFlow >= 0 && ret20 >= 0 ? "吸籌拉升區（價漲＋法人買）" : instFlow >= 0 && ret20 < 0 ? "逢低吸籌區（價跌＋法人買）" : instFlow < 0 && ret20 >= 0 ? "拉高出貨區（價漲＋法人賣）" : "殺跌出貨區（價跌＋法人賣）";
+  // 外資投信背離
+  const diverge = (fStreak > 0 && tStreak < 0) ? "外資買、投信賣（短線分歧，看外資續航）" : (fStreak < 0 && tStreak > 0) ? "外資賣、投信買（短線分歧，看投信續航）" : Math.abs(fStreak) >= 3 && Math.abs(tStreak) >= 3 && ((fStreak > 0) !== (tStreak > 0)) ? "雙方連續反向， Tomas 以日明細確認誰先轉向" : "雙方無明顯連續背離";
+  // 訊號矩陣八格：沿用原站口徑（多/空/觀）
+  const sig = {
+    ai: total >= 4 ? "多" : total < 2.5 ? "空" : "觀",
+    macd: hist[i] > 0 ? "多" : "空",
+    pos: pos60 >= 80 ? "空" : pos60 <= 20 ? "多" : "觀",
+    kd: (K[i] !== null && D[i] !== null && K[i] > D[i]) ? "多" : "空",
+    ma: bull ? "多" : "觀",
+    chip: (fStreak >= 3 || tStreak >= 3) ? "多" : (fStreak <= -3 ? "空" : "觀"),
+    obv: obv5 > 0 ? "多" : obv5 < 0 ? "空" : "觀",
+    flow: instFlow >= 0 && ret20 >= 0 ? "多" : instFlow < 0 && ret20 < 0 ? "空" : "觀",
+  };
+  const sigVotes = Object.values(sig).filter((v) => v === "多").length - Object.values(sig).filter((v) => v === "空").length;
+  const sigAll = sigVotes >= 3 ? "偏多共振" : sigVotes <= -3 ? "偏空共振" : "多空均勢";
+  // 大盤連動：TAIEX 近 20 日相關係數（需額外查詢，失敗則 null）
+  let beta20 = null, corr20 = null;
+  try {
+    const mkt = await finmind("TaiwanStockPrice", "TAIEX", fmtDate(addDays(new Date(), -60)), end, { force });
+    if (mkt && mkt.length > 25) {
+      mkt.sort((a, b) => a.date < b.date ? -1 : 1);
+      const byD = {};
+      for (const r of mkt) byD[r.date] = r.close;
+      const pairs = [];
+      for (let j = Math.max(0, price.length - 21); j < price.length; j++) {
+        const mc = byD[price[j].date];
+        if (mc) pairs.push([price[j].close, mc]);
+      }
+      if (pairs.length > 10) {
+        const n = pairs.length;
+        const mx = pairs.reduce((s, p) => s + p[0], 0) / n, my = pairs.reduce((s, p) => s + p[1], 0) / n;
+        let sxy = 0, sxx = 0, syy = 0;
+        for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) * (x - mx); syy += (y - my) * (y - my); }
+        corr20 = (sxx && syy) ? sxy / Math.sqrt(sxx * syy) : null;
+        beta20 = syy ? sxy / syy : null;
+      }
+    }
+  } catch (e) { /* 大盤抓不到就留空 */ }
   return {
     code, name, last, prev, chg, pct,
     ma5: ma5[i], ma10: ma10[i], ma20: ma20[i], ma60: ma60[i],
@@ -256,6 +332,9 @@ async function analyze(code, { force = false } = {}) {
     lastDays, dims, total, verdict, tone,
     closes: closes.slice(-120), ma20line: ma20.slice(-120), dates: price.slice(-120).map((r) => r.date),
     volume: vols[i],
+    bbPos, bbState, bbUp: bbUp[i], bbDn: bbDn[i], bbMid: bbMid[i],
+    obv5, obvState, md14, ret20, instFlow, flowQuad, diverge, sig, sigAll,
+    beta20, corr20,
   };
 }
 
@@ -334,16 +413,32 @@ async function renderStock(a) {
     return "<tr><td class='num'>" + esc(r.date) + "</td><td class='num " + cls(f) + "'>" + fmtInt(f) + "</td><td class='num " + cls(t) + "'>" + fmtInt(t) + "</td><td class='num " + cls(d) + "'>" + fmtInt(d) + "</td></tr>";
   }).join("");
 
+  const sigCell = (label, v) => '<div class="cell"><b>' + esc(label) + '</b><span class="num" style="font-size:18px">' + esc(v) + '</span></div>';
+  const sigOrder = [["AI 綜合", a.sig.ai], ["MACD", a.sig.macd], ["位置", a.sig.pos], ["KD", a.sig.kd], ["均線", a.sig.ma], ["法人", a.sig.chip], ["OBV", a.sig.obv], ["流體", a.sig.flow]];
   $("stock-body").innerHTML =
     '<h3>六維度結構評分</h3><div class="matrix">' + a.dims.map(dimRow).join("") + '</div>' +
     '<div class="grid-3" style="margin-top:12px">' +
     '<div class="cell"><b>RSI(14)</b><span class="num" style="font-size:20px">' + fmtNum(a.rsi, 1) + '</span><br><span class="muted">' + (a.rsi === null ? "資料不足" : a.rsi >= 70 ? "過熱區" : a.rsi <= 30 ? "超賣區" : "中性區") + '</span></div>' +
     '<div class="cell"><b>乖離 MA20</b><span class="num" style="font-size:20px">' + (a.bias20 === null ? "—" : (a.bias20 > 0 ? "+" : "") + fmtNum(a.bias20) + "%") + '</span><br><span class="muted">MA20 ' + fmtNum(a.ma20) + '</span></div>' +
     '<div class="cell"><b>位置（60 日 / 年）</b><span class="num" style="font-size:20px">' + fmtNum(a.pos60, 0) + ' / ' + fmtNum(a.posY, 0) + '</span><br><span class="muted">距 60 日高點 ' + fmtNum(a.drawdown, 1) + '%</span></div></div>' +
+    '<h3>動能掃描</h3><div class="kv">' +
+    '<span class="muted">MD14</span><span class="num">' + (a.md14 >= 0 ? "+" : "") + fmtNum(a.md14) + '%（14 日漲跌，站穩為正）</span>' +
+    '<span class="muted">布林位置</span><span>' + fmtNum(a.bbPos, 0) + ' / 100 · ' + esc(a.bbState) + '（上軌 ' + fmtNum(a.bbUp) + ' / 下軌 ' + fmtNum(a.bbDn) + '）</span>' +
+    '<span class="muted">OBV</span><span>' + esc(a.obvState) + '</span></div>' +
+    '<h3>訊號矩陣（多 / 空 / 觀）</h3><div class="matrix">' + sigOrder.map(([k, v]) => sigCell(k, v)).join("") + '</div>' +
+    '<p class="sub" style="margin-top:6px">綜合：' + esc(a.sigAll) + '。沿用原站八格口徑，僅為方向投票，不是買賣建議。</p>' +
     '<h3>近 120 日走勢（收盤線＋MA20）</h3><canvas class="chart" id="chart"></canvas>' +
     '<h3>法人籌碼</h3>' +
     '<p class="sub">近 5 日合計（張）：外資 <b class="num">' + fmtInt(a.f5 / 1000) + '</b> · 投信 <b class="num">' + fmtInt(a.t5 / 1000) + '</b> · 自營 <b class="num">' + fmtInt(a.d5 / 1000) + '</b>。連買賣：外資 ' + a.fStreak + ' 日、投信 ' + a.tStreak + ' 日（正數連買、負數連賣）。</p>' +
     '<div class="table-wrap"><table><thead><tr><th>日期</th><th>外資（張）</th><th>投信（張）</th><th>自營（張）</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<h3>籌碼流體</h3><div class="kv">' +
+    '<span class="muted">四象限</span><span>' + esc(a.flowQuad) + '（20 日漲跌 ' + (a.ret20 >= 0 ? "+" : "") + fmtNum(a.ret20) + '%，法人 5 日合計 ' + fmtInt(a.instFlow) + ' 張）</span>' +
+    '<span class="muted">外資投信背離</span><span>' + esc(a.diverge) + '</span></div>' +
+    '<h3>大盤連動（TAIEX 近 20 日）</h3><div class="kv">' +
+    '<span class="muted">相關係數</span><span class="num">' + (a.corr20 === null ? "—（大盤資料不足）" : fmtNum(a.corr20, 2)) + '</span>' +
+    '<span class="muted">Beta</span><span class="num">' + (a.beta20 === null ? "—" : fmtNum(a.beta20, 2)) + '</span></div>' +
+    '<div class="row" style="margin-top:10px"><button type="button" id="btn-funda">載入獲利品質 / 本益比（基本面）</button><span class="muted" id="funda-msg" style="font-size:12.5px"></span></div>' +
+    '<div id="funda-body"></div>' +
     '<h3>判讀</h3><div class="kv">' +
     '<span class="muted">趨勢</span><span>' + esc(trendText(a)) + '</span>' +
     '<span class="muted">動能</span><span>' + esc(momentumText(a)) + '</span>' +
@@ -351,7 +446,43 @@ async function renderStock(a) {
     '<span class="muted">位置</span><span>' + esc(posText(a)) + '</span></div>' +
     '<div class="alert" style="margin-top:10px">僅為量化結構描述，不是買賣建議。短線訊號雜訊大，法人與均線需互相確認；槓桿型 ETF 另有耗損與價差問題，不適用同一套解讀。</div>';
   drawChart($("chart"), a);
+  $("btn-funda").addEventListener("click", () => loadFunda(a));
   pushRecent(a.code, a.name);
+}
+async function loadFunda(a) {
+  $("btn-funda").disabled = true;
+  $("funda-msg").textContent = "抓取營收、財報、PER 中…";
+  try {
+    const end = fmtDate(new Date());
+    const [rev, per, news] = await Promise.all([
+      finmind("TaiwanStockMonthRevenue", a.code, "2022-01-01", end, {}),
+      finmind("TaiwanStockPER", a.code, fmtDate(addDays(new Date(), -400)), end, {}),
+      finmind("TaiwanStockNews", a.code, fmtDate(new Date()), {}).catch(() => []),
+    ]);
+    rev.sort((x, y) => x.date < y.date ? -1 : 1);
+    const last12 = rev.slice(0, 12);
+    const yoy = (last12.length >= 12 && rev.length >= 24)
+      ? ((rev.slice(0, 12).reduce((s, r) => s + (r.revenue || 0), 0) - rev.slice(12, 24).reduce((s, r) => s + (r.revenue || 0), 0)) / Math.max(1, rev.slice(12, 24).reduce((s, r) => s + (r.revenue || 0), 0)) * 100)
+      : null;
+    const revRows = last12.slice(0, 6).map((r) => "<tr><td class='num'>" + esc(r.date) + "</td><td class='num'>" + fmtInt((r.revenue || 0) / 1e8) + "</td></tr>").join("");
+    const lastPer = per.length ? per[per.length - 1] : null;
+    const newsList = (news || []).slice(0, 5).map((n) => "<div>· <a href='" + esc(n.link) + "' target='_blank' rel='noopener'>" + esc(n.title) + "</a> <span class='muted'>" + esc(n.source) + " " + esc(n.date) + "</span></div>").join("") || "<p class='muted'>今日尚無相關新聞。</p>";
+    $("funda-body").innerHTML =
+      '<h3>獲利品質（月營收）</h3>' +
+      '<p class="sub">近 12 個月合計年增 ' + (yoy === null ? "—（資料不足）" : (yoy >= 0 ? "+" : "") + fmtNum(yoy) + "%") + '。財報地雷的早期徵兆是「帳上賺錢但收不到現金」，此處以營收連續性作為第一層體檢，完整財報解讀仍需看季報現金流。</p>' +
+      '<div class="table-wrap"><table><thead><tr><th>月份</th><th>營收（億元）</th></tr></thead><tbody>' + (revRows || "<tr><td colspan='2'>無營收資料</td></tr>") + '</tbody></table></div>' +
+      '<h3>本益比 / 淨值比</h3><div class="kv">' +
+      '<span class="muted">PER</span><span class="num">' + (lastPer ? fmtNum(lastPer.PER) + "（" + esc(lastPer.date) + "）" : "—") + '</span>' +
+      '<span class="muted">PBR</span><span class="num">' + (lastPer ? fmtNum(lastPer.PBR) : "—") + '</span>' +
+      '<span class="muted">殖利率</span><span class="num">' + (lastPer ? fmtNum(lastPer.dividend_yield) + "%" : "—") + '</span></div>' +
+      '<p class="sub">貴不貴看跟自己過去一年比，跨產業直接比 PER 沒有意義，僅供參考。</p>' +
+      '<h3>相關新聞（今日）</h3>' + newsList;
+    $("funda-msg").textContent = "完成。基本面為慢變數，盤中不需要重複載入。";
+  } catch (e) {
+    $("funda-msg").textContent = "載入失敗：" + (e instanceof Error ? e.message : e);
+  } finally {
+    $("btn-funda").disabled = false;
+  }
 }
 function trendText(a) {
   if (a.ma20 && a.last.close > a.ma20 && a.ma5 > a.ma10 && a.ma10 > a.ma20) return "收在 MA20 之上且短中均線多頭排列，趨勢偏多。";
@@ -411,6 +542,42 @@ function scoreByMode(a, mode) {
   if (mode === "macd") return a.total;
   if (mode === "inst") return Math.max(a.fStreak, 0) + Math.max(a.tStreak, 0) + (a.f5 > 0 ? 1 : 0) + (a.t5 > 0 ? 1 : 0);
   if (mode === "oversold") return (-a.drawdown) + (a.rsi !== null && a.rsi < 35 ? 10 : 0) + (a.f5 > 0 || a.t5 > 0 ? 5 : 0);
+  if (mode === "marginWash") {
+    // 資減人走：近似以「法人賣超＋量縮＋站不回 MA20」為淨化候選
+    let s = 0;
+    if (a.f5 < 0 && a.t5 <= 0) s += 2;
+    if (a.last.close < a.ma20) s += 1;
+    if (a.rsi !== null && a.rsi < 40) s += 1;
+    if (a.drawdown <= -7) s += 1;
+    return s;
+  }
+  if (mode === "breakout") {
+    // 突破結構：站上 MA20＋MACD 翻紅＋法人回補＋位置初升
+    let s = 0;
+    if (a.last.close > a.ma20) s += 2;
+    if (a.hist > 0) s += 1.5;
+    if (a.f5 > 0 || a.t5 > 0) s += 1.5;
+    if (a.pos60 >= 30 && a.pos60 <= 80) s += 1;
+    return s;
+  }
+  if (mode === "foreignStrong") {
+    // 外盤強勢近似：連漲＋量能＋法人同買（無逐筆內外盤，方法說明已揭露近似）
+    let s = 0;
+    if (a.md14 > 0) s += 1.5;
+    if (a.obv5 > 0) s += 1.5;
+    if (a.f5 > 0) s += 1.5;
+    if (a.rsi !== null && a.rsi >= 55) s += 1;
+    return s;
+  }
+  if (mode === "chipCycle") {
+    // 籌碼週期階段分：吸籌/拉升/出貨/洗盤（以流體四象限＋連續性近似）
+    const buy = a.instFlow >= 0;
+    const up = a.ret20 >= 0;
+    if (!up && buy) return 4; // 吸籌
+    if (up && buy) return 3; // 拉升
+    if (up && !buy) return 2; // 出貨
+    return 1; // 洗盤/殺跌
+  }
   // bottom
   let s = 0;
   if (a.drawdown <= -12) s += 2; else if (a.drawdown <= -7) s += 1;
@@ -420,10 +587,15 @@ function scoreByMode(a, mode) {
   if (a.last.close > a.ma20) s += 0.5;
   return s;
 }
+const CHIP_CYCLE_NAME = { 4: "吸籌期", 3: "拉升期", 2: "出貨期", 1: "洗盤期" };
 function passMode(a, mode) {
   if (mode === "macd") return a.total >= 4;
   if (mode === "inst") return a.fStreak >= 3 || a.tStreak >= 3;
   if (mode === "oversold") return a.drawdown <= -10 && a.rsi !== null && a.rsi < 45;
+  if (mode === "marginWash") return a.f5 < 0 && a.last.close < a.ma20 && a.drawdown <= -5;
+  if (mode === "breakout") return a.last.close > a.ma20 && a.hist > 0 && (a.f5 > 0 || a.t5 > 0);
+  if (mode === "foreignStrong") return a.md14 > 3 && a.obv5 > 0 && a.f5 > 0;
+  if (mode === "chipCycle") return true; // 全部顯示階段，依排序看
   return a.drawdown <= -7 && (a.f5 > 0 || a.t5 > 0 || a.hist > 0);
 }
 async function doScan() {
@@ -465,14 +637,18 @@ function renderScan(list, mode) {
     if (sort === "inst") return (y.fStreak + y.tStreak) - (x.fStreak + x.tStreak);
     return y._scanScore - x._scanScore;
   });
+  const modeNow = $("mode").value;
   $("scan-result").innerHTML = arr.map((a, idx) => {
     const dir = a.chg > 0 ? "up" : a.chg < 0 ? "down" : "";
+    const extra = modeNow === "chipCycle"
+      ? '<div class="muted" style="font-size:12px">籌碼階段：' + esc(CHIP_CYCLE_NAME[a._scanScore] || "—") + ' · ' + esc(a.flowQuad) + '</div>'
+      : "";
     return '<div class="stock-card" data-code="' + esc(a.code) + '" style="cursor:pointer' + (a._pass ? ";border-width:2px" : ";opacity:.82") + '">' +
       '<div class="row" style="justify-content:space-between"><b>' + esc(a.name) + ' <span class="muted num">' + esc(a.code) + '</span></b>' +
       '<span class="score ' + dir + '">' + fmtNum(a._pass ? a.total : a._scanScore, 1) + '</span></div>' +
       '<div class="num ' + dir + '" style="font-size:20px;font-weight:700">' + fmtNum(a.last.close) + ' <span style="font-size:12px">' + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + '%</span></div>' +
       '<div style="margin:6px 0">' + verdictPill(a) + ' ' + (a._pass ? '<span class="pill good">通過</span>' : '<span class="pill">未通過</span>') + '</div>' +
-      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' +
+      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + extra +
       '<div class="muted" style="font-size:12px">第 ' + (idx + 1) + ' 名 · 點卡片看完整診斷</div></div>';
   }).join("");
   document.querySelectorAll("#scan-result .stock-card").forEach((el) => {
@@ -504,6 +680,10 @@ async function doCompare() {
     row("MACD 柱狀", (a) => fmtNum(a.hist)) +
     row("MA 結構", (a) => (a.ma5 > a.ma10 && a.ma10 > a.ma20) ? "多頭排列" : "非多排") +
     row("60 日位置", (a) => fmtNum(a.pos60, 0) + "%") +
+    row("布林位置", (a) => fmtNum(a.bbPos, 0) + " / 100") +
+    row("OBV 方向", (a) => a.obv5 > 0 ? "流入" : a.obv5 < 0 ? "流出" : "持平") +
+    row("法人 5 日合計（張）", (a) => fmtInt(a.instFlow)) +
+    row("大盤相關係數", (a) => a.corr20 === null ? "—" : fmtNum(a.corr20, 2)) +
     "</tbody></table></div>" +
     out.filter((a) => a.error).map((a) => '<p class="muted">' + esc(a.code) + "：" + esc(a.error) + "</p>").join("");
 }
@@ -790,6 +970,135 @@ function poolCodes(sel) {
   }
   return TOP50.slice();
 }
+/* ---------- 研究筆記（localStorage） ---------- */
+const LS_NOTES = "twscan.notes.v1";
+function getNotes() {
+  try { return JSON.parse(localStorage.getItem(LS_NOTES) || "{}"); } catch (e) { return {}; }
+}
+function setNotes(o) { try { localStorage.setItem(LS_NOTES, JSON.stringify(o)); } catch (e) { /* 忽略 */ } }
+function renderNoteHint() {
+  if (current && !$("note-code").value.trim()) $("note-code").value = current.code;
+}
+function noteLoad(codeRaw) {
+  const code = (codeRaw || $("note-code").value || (current && current.code) || "").trim();
+  if (!code) { $("note-msg").textContent = "請先輸入代號。"; return; }
+  $("note-code").value = code;
+  const n = getNotes()[code];
+  $("note-text").value = n ? (n.text || "") : "";
+  $("note-msg").textContent = n ? ("已載入（上次更新 " + (n.updated || "—") + "）") : "尚無筆記，可直接撰寫後儲存。";
+  $("note-result").innerHTML = "";
+}
+function noteSave() {
+  const code = ($("note-code").value || (current && current.code) || "").trim();
+  if (!code) { $("note-msg").textContent = "請先輸入代號。"; return; }
+  const all = getNotes();
+  all[code] = { text: $("note-text").value, updated: fmtDate(new Date()) };
+  setNotes(all);
+  $("note-msg").textContent = "已儲存 " + code + " 的筆記（僅存本機）。";
+}
+function noteSearch() {
+  const kw = $("note-search").value.trim();
+  const all = getNotes();
+  const keys = Object.keys(all).filter((c) => !kw || c.includes(kw) || (all[c].text || "").includes(kw));
+  $("note-result").innerHTML = keys.length ? keys.map((c) =>
+    '<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--border);padding:8px 0">' +
+    "<span><b class='num'>" + esc(c) + "</b> <span class='muted' style='font-size:12px'>" + esc(all[c].updated || "") + " · " + esc((all[c].text || "").slice(0, 40)) + (String(all[c].text || "").length > 40 ? "…" : "") + "</span></span>" +
+    '<button type="button" data-c="' + esc(c) + '">載入</button></div>'
+  ).join("") : '<p class="muted">沒有符合的筆記。</p>';
+  document.querySelectorAll("#note-result button").forEach((b) => b.addEventListener("click", () => noteLoad(b.getAttribute("data-c"))));
+}
+
+/* ---------- 警示與日報（追蹤清單 × 本機定時檢查） ---------- */
+const LS_ALERT_LAST = "twscan.alert_last.v1";
+function alertSettings() {
+  return {
+    macdUp: $("al-macd-up").checked, macdDn: $("al-macd-dn").checked,
+    kdGold: $("al-kd-gold").checked, kdDead: $("al-kd-dead").checked,
+    above20: $("al-above20").checked, below20: $("al-below20").checked,
+    inst: $("al-inst").checked,
+  };
+}
+function alertCheckOne(a, s) {
+  const hits = [];
+  const prevClose = a.prev ? a.prev.close : null;
+  if (s.macdUp && a.hist > 0) hits.push("MACD 翻紅（柱狀 " + fmtNum(a.hist) + "）");
+  if (s.macdDn && a.hist < 0 && a.hist > -0.001) hits.push("MACD 剛翻空"); // 寬鬆：柱狀轉負初期
+  if (s.macdDn && a.hist < 0) hits.push("MACD 翻空（柱狀 " + fmtNum(a.hist) + "）");
+  if (s.kdGold && a.k !== null && a.k > a.d) hits.push("KD：K 在 D 之上（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）");
+  if (s.kdDead && a.k !== null && a.k < a.d) hits.push("KD：K 跌破 D（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）");
+  if (s.above20 && prevClose !== null && prevClose <= a.ma20 && a.last.close > a.ma20) hits.push("站上 MA20（" + fmtNum(a.ma20) + "）");
+  if (s.below20 && prevClose !== null && prevClose >= a.ma20 && a.last.close < a.ma20) hits.push("跌破 MA20（" + fmtNum(a.ma20) + "）");
+  if (s.inst && (a.fStreak >= 3 || a.tStreak >= 3)) hits.push("法人連買（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）");
+  if (s.inst && (a.fStreak <= -3 || a.tStreak <= -3)) hits.push("法人連賣（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）");
+  return hits;
+}
+async function doAlertCheck() {
+  const w = getWatch();
+  if (!w.length) { $("alert-result").innerHTML = '<p class="muted">追蹤清單是空的，先到個股診斷加入。</p>'; return; }
+  const s = alertSettings();
+  $("alert-msg").textContent = "檢查中（" + w.length + " 檔）…";
+  $("alert-result").innerHTML = "";
+  const rows = [];
+  for (const x of w.slice(0, 30)) {
+    try {
+      const a = await analyze(x.code);
+      const hits = alertCheckOne(a, s);
+      // 去重：同一代號同一條件當日只提示一次
+      let last = {};
+      try { last = JSON.parse(localStorage.getItem(LS_ALERT_LAST) || "{}"); } catch (e) { last = {}; }
+      const day = fmtDate(new Date());
+      const key = x.code + "|" + day;
+      const seen = new Set(last[key] || []);
+      const fresh = hits.filter((h) => !seen.has(h.split("（")[0]));
+      if (fresh.length) {
+        last[key] = (last[key] || []).concat(fresh.map((h) => h.split("（")[0]));
+        try { localStorage.setItem(LS_ALERT_LAST, JSON.stringify(last)); } catch (e) { /* 忽略 */ }
+      }
+      rows.push({ a, hits, fresh });
+      await sleep(350);
+    } catch (e) { rows.push({ code: x.code, error: e instanceof Error ? e.message : String(e) }); }
+  }
+  const anyFresh = rows.some((r) => r.fresh && r.fresh.length);
+  $("alert-msg").textContent = "檢查完成" + (anyFresh ? "：有新觸發（標示 NEW）" : "：本次無新觸發（均為今日已提示或未達條件）");
+  $("alert-result").innerHTML = rows.map((r) => {
+    if (r.error) return '<p class="muted">' + esc(r.code) + "：" + esc(r.error) + "</p>";
+    const tag = r.fresh && r.fresh.length ? ' <span class="pill good">NEW</span>' : "";
+    return '<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--border);padding:8px 0">' +
+      "<span><b>" + esc(r.a.name) + '</b> <span class="muted num">' + esc(r.a.code) + "</span> — " + (r.hits.length ? esc(r.hits.join("；")) : '<span class="muted">未達勾選條件</span>') + tag + "</span>" +
+      '<button type="button" data-c="' + esc(r.a.code) + '">開啟診斷</button></div>';
+  }).join("");
+  document.querySelectorAll("#alert-result button").forEach((b) => b.addEventListener("click", () => doAnalyze(b.getAttribute("data-c"))));
+}
+async function doDaily() {
+  const w = getWatch();
+  if (!w.length) { $("daily-result").innerHTML = '<p class="muted">追蹤清單是空的，先到個股診斷加入。</p>'; return; }
+  $("alert-msg").textContent = "產出日報中（" + w.length + " 檔）…";
+  $("daily-result").innerHTML = "";
+  const rows = [];
+  for (const x of w.slice(0, 30)) {
+    try { rows.push(await analyze(x.code)); await sleep(350); }
+    catch (e) { rows.push({ code: x.code, error: e instanceof Error ? e.message : String(e) }); }
+  }
+  const good = rows.filter((r) => !r.error);
+  const up = good.filter((r) => r.pct > 0).length, dn = good.filter((r) => r.pct < 0).length;
+  const strong = good.filter((r) => r.total >= 4).map((r) => r.name + r.code).join("、") || "無";
+  const weak = good.filter((r) => r.total < 2.5).map((r) => r.name + r.code).join("、") || "無";
+  const row = (label, fn) => "<tr><td>" + label + "</td>" + good.map((a) => "<td class='num'>" + fn(a) + "</td>").join("") + "</tr>";
+  $("alert-msg").textContent = "";
+  $("daily-result").innerHTML = '<h3 style="margin:4px 0">今日日報（' + fmtDate(new Date()) + '）</h3>' +
+    '<div class="kv"><span class="muted">追蹤</span><span>' + good.length + " 檔成功 · 上漲 " + up + " 檔 · 下跌 " + dn + " 檔</span>" +
+    '<span class="muted">結構強勢（≥4 分）</span><span>' + esc(strong) + '</span>' +
+    '<span class="muted">結構偏弱（<2.5 分）</span><span>' + esc(weak) + "</span></div>" +
+    '<div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>項目</th>' +
+    good.map((a) => "<th>" + esc(a.name) + " " + esc(a.code) + "</th>").join("") + "</tr></thead><tbody>" +
+    row("現價 / 漲跌", (a) => fmtNum(a.last.close) + " / " + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + "%") +
+    row("綜合 / 判讀", (a) => fmtNum(a.total, 1) + " · " + esc(a.verdict)) +
+    row("訊號矩陣", (a) => esc(a.sigAll)) +
+    row("法人", (a) => "外資連 " + a.fStreak + " 日 / 投信連 " + a.tStreak + " 日") +
+    row("位置", (a) => "60日 " + fmtNum(a.pos60, 0) + "% · 距高 " + fmtNum(a.drawdown, 1) + "%") +
+    "</tbody></table></div><div class='alert' style='margin-top:10px'>日報為收盤結構摘要，非買賣建議；盤中數值會變動，收盤後為準。</div>";
+}
+
 function getWatch() {
   try { return JSON.parse(localStorage.getItem(LS_WATCH) || "[]"); } catch (e) { return []; }
 }
@@ -841,7 +1150,10 @@ function switchTab(name) {
   $("tab-dividend").hidden = name !== "dividend";
   $("tab-sector").hidden = name !== "sector";
   $("tab-watch").hidden = name !== "watch";
+  $("tab-notes").hidden = name !== "notes";
+  $("tab-alerts").hidden = name !== "alerts";
   if (name === "watch") renderWatch();
+  if (name === "notes") renderNoteHint();
 }
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
@@ -862,7 +1174,14 @@ function methodHtml() {
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
     "<span class='muted'>板塊</span><span>X 為 20 日漲跌、Y 為 5 日法人合計（張）、氣泡為均量；產業來自 FinMind 分類。</span>" +
-    "</div><div class='alert' style='margin-top:10px'>免費額度有限（匿名＋個人 Token 每日約數百次）。掃描 50 檔會消耗約 100 次查詢，建議先設 Token、必要時再掃。</div>";
+    "<span class='muted'>筆記</span><span>研究筆記只存本機 localStorage，跨裝置不會同步；僅供個人研究記錄。</span>" +
+    "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件檢查，需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
+    "<span class='muted'>動能 MD14</span><span>14 日漲跌幅，站穩為正；沿用原站口徑摘要。</span>" +
+    "<span class='muted'>訊號矩陣</span><span>AI 綜合/MACD/位置/KD/均線/法人/OBV/流體八格，多空觀投票；≥3 票差為共振，僅為方向投票。</span>" +
+    "<span class='muted'>籌碼流體</span><span>法人 5 日合計（張）× 20 日漲跌的四象限：吸籌拉升 / 逢低吸籌 / 拉高出貨 / 殺跌出貨。</span>" +
+    "<span class='muted'>大盤連動</span><span>個股近 20 日收盤 vs TAIEX 的相關係數與 Beta；大盤資料不足則留空。</span>" +
+    "<span class='muted'>基本面</span><span>近 12 個月營收年增率（月營收 YoY 中位數近似）、PER/PBR/殖利率、當日相關新聞標題；僅供交叉確認。</span>" +
+    "</div><div class='alert' style='margin-top:10px'>免費額度有限（匿名＋個人 Token 每日約數百次）。掃描 50 檔會消耗約 100 次查詢，建議先設 Token、必要時再掃。OBI 逐筆內外盤、融資券明細、券商分點、千張大戶集保、美股期貨領先、VIP 授權、大富翁遊戲、早安推播非公開免費來源，未納入。</div>";
 }
 
 /* ---------- 啟動 ---------- */
@@ -897,6 +1216,19 @@ document.addEventListener("DOMContentLoaded", () => {
   $("btn-dividend").addEventListener("click", doDividend);
   $("div-sort").addEventListener("change", () => { /* 下次渲染生效 */ });
   $("btn-sector").addEventListener("click", doSector);
+  $("btn-note-load").addEventListener("click", () => noteLoad());
+  $("note-code").addEventListener("keydown", (e) => { if (e.key === "Enter") noteLoad(); });
+  $("btn-note-save").addEventListener("click", noteSave);
+  $("btn-note-clear").addEventListener("click", () => { $("note-text").value = ""; $("note-msg").textContent = "已清空輸入框（尚未儲存）。"; });
+  $("btn-note-search").addEventListener("click", noteSearch);
+  $("note-search").addEventListener("keydown", (e) => { if (e.key === "Enter") noteSearch(); });
+  $("btn-alert-check").addEventListener("click", doAlertCheck);
+  $("btn-daily").addEventListener("click", doDaily);
+  setInterval(() => {
+    try {
+      if (document.visibilityState === "visible" && getWatch().length) doAlertCheck();
+    } catch (e) { /* 定時檢查失敗不打擾 */ }
+  }, 60 * 60 * 1000);
   $("btn-theme").addEventListener("click", () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
   $("btn-token").addEventListener("click", () => { $("token-input").value = getToken(); $("dlg-token").showModal(); });
   $("token-cancel").addEventListener("click", () => $("dlg-token").close());
