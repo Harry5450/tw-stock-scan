@@ -132,15 +132,18 @@ function infoOf(code) {
 }
 
 /* ---------- 基礎 ---------- */
+// 台北日期：查詢邊界與快取跨日判斷一律以台灣交易日為準，避免海外裝置時區差一天
+function twParts(date) {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei", year: "numeric", month: "2-digit", day: "2-digit" }).format(date).split("-");
+  return { y: Number(p[0]), m: Number(p[1]), d: Number(p[2]) };
+}
 function fmtDate(d) {
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return d.getFullYear() + "-" + m + "-" + day;
+  const t = twParts(d);
+  return t.y + "-" + String(t.m).padStart(2, "0") + "-" + String(t.d).padStart(2, "0");
 }
 function addDays(base, n) {
-  const d = new Date(base.getTime());
-  d.setDate(d.getDate() + n);
-  return d;
+  const t = twParts(base);
+  return new Date(Date.UTC(t.y, t.m - 1, t.d + n, 12));
 }
 function fmtNum(n, digits) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -157,7 +160,7 @@ function fmtSignedLots(value, digits = 0) {
 function valueTone(value) { return value > 0 ? "up" : value < 0 ? "down" : "muted"; }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function getToken() { return localStorage.getItem(LS_TOKEN) || ""; }
-function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 async function finmind(dataset, dataId, startDate, endDate, { force = false } = {}) {
   const token = getToken();
