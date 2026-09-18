@@ -49,7 +49,7 @@
     <button type="button" data-tab="compare">多股比較</button>
     <button type="button" data-tab="backtest">回測統計</button>
     <button type="button" data-tab="dividend">除息雷達</button>
-    <button type="button" data-tab="sector">板塊氣泡</button>
+    <button type="button" data-tab="sector">資金動能地圖</button>
     <button type="button" data-tab="watch">追蹤清單</button>
     <button type="button" data-tab="notes">研究筆記</button>
     <button type="button" data-tab="alerts">警示日報</button>
@@ -245,12 +245,30 @@
   </section>
 
   <section class="card" id="tab-sector" hidden aria-label="板塊資金動能地圖">
-    <h2>板塊資金動能地圖</h2>
-    <p class="sub">以 Tide 的「潮汐」讀法重新設計：越右＝近 5 日法人買越多；越上＝法人流向相對前 15 日轉強；泡泡越大＝近 20 日均量越大。若選的族群只屬同一產業，智慧呈現會自動切成個股，避免只剩一顆看不懂的泡泡。</p>
+    <h2>今日資金動能地圖</h2>
+    <p class="sub">先用法人流向找出正在轉強、轉弱或降溫的板塊，再下鑽個股確認。越右＝近 5 日法人買越多；越上＝法人流向相對前 15 日轉強；泡泡越大＝近 20 日均量越大。</p>
+    <div class="sector-start" aria-label="建立今日地圖">
+      <div class="sector-start-copy">
+        <span class="section-kicker">STEP 1</span>
+        <b>先選一個掃描範圍</b>
+        <p>第一次使用建議從快速看盤開始；確認有興趣的方向後，再掃完整市場或指定族群。</p>
+      </div>
+      <div class="sector-presets" role="group" aria-label="常用掃描範圍">
+        <button type="button" class="sector-preset active" data-sector-preset="quick" aria-pressed="true">
+          <span><b>快速看盤</b><small>市值代表 10 檔 · 約 20–45 秒 · 約 20 次請求</small></span>
+          <span class="pill good">推薦</span>
+        </button>
+        <button type="button" class="sector-preset" data-sector-preset="full" aria-pressed="false">
+          <span><b>完整市場</b><small>市值前 50 大 · 約 1–3 分鐘 · 約 100 次請求</small></span>
+          <span class="pill">完整</span>
+        </button>
+      </div>
+    </div>
     <div class="row">
-      <label for="sec-pool">股票池</label>
+      <label for="sec-pool">掃描範圍</label>
       <select id="sec-pool">
-        <option value="top50">市值前 50 大</option>
+        <option value="quick">快速看盤｜市值代表 10 檔</option>
+        <option value="top50">完整市場｜市值前 50 大</option>
         <option value="watch">我的追蹤清單</option>
         <option value="custom">自訂池</option>
         <option value="sector:semi">半導體族群</option>
@@ -264,9 +282,10 @@
         <option value="sector:food">食品族群</option>
         <option value="sector:textile">紡織族群</option>
       </select>
-      <button id="btn-sector" class="primary" type="button">開始掃描</button>
+      <button id="btn-sector" class="primary" type="button">建立今日地圖</button>
       <span class="muted" id="sec-status" style="font-size:12.5px"></span>
     </div>
+    <p id="sec-scan-hint" class="sector-scan-hint">快速看盤會先掃描 10 檔市值代表股，資料只用於本次地圖，不會自動加入追蹤。</p>
     <div style="margin-top:10px"><div class="bar" aria-hidden="true"><i id="sec-bar" style="width:0%"></i></div></div>
     <div class="sector-toolbar" aria-label="板塊地圖控制項">
       <div class="row">
@@ -286,6 +305,18 @@
       </div>
     </div>
     <div id="sector-insight" class="sector-insight" aria-live="polite"></div>
+    <div id="sector-focus" class="sector-focus" aria-live="polite">
+      <div class="sector-focus-head">
+        <div>
+          <span class="section-kicker">STEP 2 · 掃描後</span>
+          <h3>今天先看這三件事</h3>
+          <p class="sub">把四象限轉成下一步：查看明細、確認領先股，或加入自己的追蹤清單。</p>
+        </div>
+      </div>
+      <div id="sector-focus-items" class="sector-focus-grid">
+        <div class="sector-focus-empty">完成掃描後，這裡會依當次資料整理「資金加速流入」、「賣壓收斂」與「買超降溫」三個重點。</div>
+      </div>
+    </div>
     <div class="sector-map-shell" aria-live="polite">
       <div id="sector-chart" class="sector-chart" role="img" aria-label="板塊資金動能地圖"></div>
       <div id="sector-tooltip" class="sector-tooltip" hidden></div>

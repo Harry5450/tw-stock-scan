@@ -11,6 +11,7 @@ const LS_STOCK_INFO = "twscan.stock-info.v1";
 const STOCK_INFO_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TOP50 = ["2330","2317","2454","2308","2303","2881","2882","2891","2892","2886","2885","2884","5880","2880","2887","2002","1301","1303","1326","1216","2207","2603","2615","2618","2629","2412","3711","3034","3037","6669","2379","2382","2357","3231","3661","3443","2345","2356","2360","2395","2408","3008","6415","1590","2049","2105","2327","2376","2883","2889"];
+const QUICK10 = TOP50.slice(0, 10);
 const HOT = [["2330","台積電"],["2317","鴻海"],["2454","聯發科"],["2303","聯電"],["2891","中信金"]];
 const NAME_FALLBACK = {2330:"台積電",2317:"鴻海",2454:"聯發科",2308:"台達電",2303:"聯電",2881:"富邦金",2882:"國泰金",2891:"中信金",2892:"第一金",2886:"兆豐金",2885:"元大金",2884:"玉山金",5880:"合庫金",2412:"中華電",2603:"長榮",2002:"中鋼",1216:"統一",1301:"台塑",3711:"日月光投控",6669:"緯穎",2382:"廣達",2357:"華碩",3231:"緯創"};
 
@@ -1174,6 +1175,88 @@ function renderSectorInsight(rows) {
       '</b><span class="muted">' + members.length + " 個" + (lead ? " · 20日 " + (lead.ret20 >= 0 ? "+" : "") + fmtNum(lead.ret20, 1) + "%" : "") + "</span></div>";
   }).join("") : "";
 }
+function sectorFocusLabels(rows) {
+  return rows.slice(0, 3).map((row) => row.label).join("、");
+}
+function openSectorFocusRow(key) {
+  if (!sectorState.rows.some((row) => row.key === key)) return;
+  sectorState.selectedKey = key;
+  renderSectorMap();
+  const detail = $("sector-detail");
+  if (detail && typeof detail.scrollIntoView === "function") detail.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function renderSectorFocus(rows) {
+  const host = $("sector-focus-items");
+  if (!host) return;
+  if (secScanning) {
+    host.innerHTML = '<div class="sector-focus-empty">正在掃描，已完成 ' + sectorState.records.length + ' 檔的資料整理；「今天先看這三件事」會在整個範圍完成後一次產生，避免把部分資料當成完整結論。</div>';
+    return;
+  }
+  if (!rows.length) {
+    host.innerHTML = '<div class="sector-focus-empty">完成掃描後，這裡會依當次資料整理「資金加速流入」、「賣壓收斂」與「買超降溫」三個重點。</div>';
+    return;
+  }
+  const previousRows = sectorState.offset < getSectorOffsetMax() ? getSectorRows(sectorState.offset + 1) : [];
+  const previousByKey = new Map(previousRows.map((row) => [row.key, row]));
+  const tides = rows.filter((row) => row.phase.key === "tide").sort((a, b) => b.accel - a.accel || b.flow - a.flow);
+  const turnedWatch = rows.filter((row) => row.phase.key === "watch" && previousByKey.get(row.key) && previousByKey.get(row.key).phase.key === "ebb")
+    .sort((a, b) => b.accel - a.accel || b.flow - a.flow);
+  const watches = turnedWatch.length ? turnedWatch : rows.filter((row) => row.phase.key === "watch").sort((a, b) => b.accel - a.accel || b.flow - a.flow);
+  const rotations = rows.filter((row) => row.phase.key === "rotation").sort((a, b) => b.flow - a.flow || a.accel - b.accel);
+  const cards = [
+    {
+      kind: "tide",
+      step: "1. 資金加速流入",
+      row: tides[0],
+      labels: sectorFocusLabels(tides),
+      empty: "目前未出現「買超且加速」的項目；先留意是否有新訊號進入漲潮區。",
+      text: "近 5 日法人買超且流向轉強。先下鑽確認成分股是否同步，不把單一泡泡當成買賣指令。",
+    },
+    {
+      kind: "watch",
+      step: "2. 賣壓開始收斂",
+      row: watches[0],
+      labels: sectorFocusLabels(watches),
+      empty: "目前沒有賣壓明顯收斂的項目；退潮區仍需優先控管風險。",
+      text: turnedWatch.length ? "前一交易日仍在退潮、現在轉為觀望；賣壓開始收斂，先觀察是否能持續轉強。" : "法人仍偏賣，但流出壓力開始收斂；先看後續是否有買盤接手。",
+    },
+    {
+      kind: "rotation",
+      step: "3. 買超但動能降溫",
+      row: rotations[0],
+      labels: sectorFocusLabels(rotations),
+      empty: "目前沒有「仍買超、但動能降溫」的項目；可把注意力放在漲潮與觀望兩區。",
+      text: "法人仍偏買，但相對前段的流向正在放緩；先確認價格結構與買超是否延續。",
+    },
+  ];
+  host.innerHTML = cards.map((card) => {
+    if (!card.row) {
+      return '<article class="sector-focus-card ' + card.kind + '"><span class="section-kicker">' + esc(card.step) + '</span><b>暫無明顯訊號</b><p>' + esc(card.empty) + '</p><div class="sector-focus-actions"><button type="button" disabled>等待下一輪資料</button></div></article>';
+    }
+    const lead = card.row.members[0];
+    const alreadyWatching = lead && getWatch().some((item) => item.code === lead.code);
+    const leadLabel = lead ? lead.name + " " + lead.code : card.row.label;
+    const labels = card.labels || card.row.label;
+    return '<article class="sector-focus-card ' + card.kind + '"><span class="section-kicker">' + esc(card.step) + '</span><b>' + esc(labels) + '</b><p>' + esc(card.text) + '</p>' +
+      '<div class="sector-focus-meta">' + esc(card.row.label) + " · 法人 " + esc(signedLots(card.row.flow)) + " 張 · 20 日 " + esc((card.row.ret20 >= 0 ? "+" : "") + fmtNum(card.row.ret20, 1)) + '%</div>' +
+      '<div class="sector-focus-actions"><button type="button" data-sector-focus-open="' + esc(card.row.key) + '">查看明細</button>' +
+      (lead ? '<button type="button" class="ghost" data-sector-focus-watch="' + esc(lead.code) + '" data-sector-focus-name="' + esc(lead.name) + '"' + (alreadyWatching ? " disabled" : "") + '>' + (alreadyWatching ? "已在追蹤" : "追蹤 " + esc(leadLabel)) + '</button>' : "") +
+      '</div></article>';
+  }).join("");
+  host.querySelectorAll("[data-sector-focus-open]").forEach((button) => button.addEventListener("click", () => openSectorFocusRow(button.getAttribute("data-sector-focus-open"))));
+  host.querySelectorAll("[data-sector-focus-watch]").forEach((button) => button.addEventListener("click", () => {
+    const code = button.getAttribute("data-sector-focus-watch");
+    const name = button.getAttribute("data-sector-focus-name") || code;
+    const watch = getWatch();
+    if (!watch.some((item) => item.code === code)) {
+      watch.unshift({ code, name, at: Date.now() });
+      setWatch(watch.slice(0, 100));
+      renderWatch();
+    }
+    button.textContent = "已在追蹤";
+    button.disabled = true;
+  }));
+}
 function showSectorTooltip(row) {
   const tooltip = $("sector-tooltip");
   if (!tooltip) return;
@@ -1293,6 +1376,7 @@ function renderSectorMap() {
   sectorState.rows = rows;
   setSectorControls(rows, maxOffset);
   renderSectorInsight(rows);
+  renderSectorFocus(rows);
   drawSector($("sector-chart"), rows);
   renderSectorDetail(rows);
   renderSectorTable(rows);
@@ -1326,13 +1410,17 @@ async function doSector() {
   sectorState = { records: [], offset: 0, selectedKey: null, rows: [] };
   secScanning = true;
   $("btn-sector").disabled = true;
+  $("btn-sector").textContent = "建立中…";
   $("sec-view").disabled = true;
   $("sec-buy-only").disabled = true;
   $("btn-sector-play").disabled = true;
   $("sec-offset").disabled = true;
   $("sec-offset").value = "0";
   $("sec-date").textContent = "掃描中";
+  $("sec-bar").style.width = "0%";
+  $("sec-status").textContent = "準備掃描「" + poolLabel(poolSel) + "」共 " + pool.length + " 檔…";
   $("sector-insight").innerHTML = "";
+  $("sector-focus-items").innerHTML = '<div class="sector-focus-empty">正在收集資料並整理今日重點；完成後可直接下鑽或加入追蹤。</div>';
   $("sector-detail").innerHTML = "";
   $("sector-result").innerHTML = "";
   $("sector-chart").innerHTML = '<p class="muted" style="padding:16px">建立資金動能地圖中…</p>';
@@ -1351,19 +1439,22 @@ async function doSector() {
     await sleep(350);
   }
   $("sec-bar").style.width = "100%";
+  secScanning = false;
+  renderSectorMap();
   const actualMode = sectorState.rows[0] && sectorState.rows[0].mode;
   const view = $("sec-view").value === "auto"
     ? (actualMode === "stock" ? "智慧呈現（個股）" : "智慧呈現（產業板塊）")
     : $("sec-view").selectedOptions[0].text;
   $("sec-status").textContent = "完成：共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail + "。目前為「" + view + "」，可切換呈現方式、點泡泡下鑽或播放回放。";
-  secScanning = false;
   $("btn-sector").disabled = false;
+  $("btn-sector").textContent = "重新建立地圖";
 }
 
 /* ---------- 追蹤 / 最近 ---------- */
 const LS_POOL = "twscan.custompool";
 const LS_FILTERS = "twscan.filters.v1";
 function poolCodes(sel) {
+  if (sel === "quick") return QUICK10.slice();
   if (sel === "watch") return getWatch().map((x) => x.code);
   if (sel === "custom") {
     try {
@@ -1380,6 +1471,7 @@ function poolCodes(sel) {
   return TOP50.slice();
 }
 function poolLabel(sel) {
+  if (sel === "quick") return "快速看盤（市值代表 10 檔）";
   if (sel === "watch") return "追蹤清單";
   if (sel === "custom") return "自訂池";
   if (sel && sel.indexOf("sector:") === 0) {
@@ -1387,6 +1479,36 @@ function poolLabel(sel) {
     return pool ? pool.label + "族群" : sel;
   }
   return "市值前 50 大";
+}
+function sectorScopeHint(sel) {
+  const count = poolCodes(sel).length;
+  if (sel === "quick") return "快速看盤會先掃描 10 檔市值代表股，約 20–45 秒、約 20 次資料請求；資料只用於本次地圖，不會自動加入追蹤。";
+  if (sel === "top50") return "完整市場會掃描市值前 50 大，約 1–3 分鐘、約 100 次資料請求；建議已設定 FinMind Token 時使用。";
+  if (sel === "watch") return count ? "將掃描你目前追蹤的 " + count + " 檔，方便把個股清單放回整體資金脈絡。" : "追蹤清單目前是空的；可先從個股診斷或地圖重點加入追蹤。";
+  if (sel === "custom") return count ? "將掃描自訂池的 " + count + " 檔。自訂池可在「海選掃描」頁籤維護。" : "自訂池目前是空的；請先到「海選掃描」頁籤輸入並儲存代號。";
+  return "將掃描「" + poolLabel(sel) + "」的 " + count + " 檔，適合聚焦比較同一個題材的資金流向。";
+}
+function syncSectorPresetUI() {
+  const select = $("sec-pool");
+  if (!select) return;
+  const active = select.value === "quick" ? "quick" : select.value === "top50" ? "full" : "";
+  document.querySelectorAll("[data-sector-preset]").forEach((button) => {
+    const on = button.getAttribute("data-sector-preset") === active;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+function renderSectorScanHint() {
+  const hint = $("sec-scan-hint");
+  if (hint) hint.textContent = sectorScopeHint($("sec-pool").value);
+}
+function setSectorPreset(preset) {
+  const select = $("sec-pool");
+  if (!select) return;
+  if (preset === "quick") select.value = "quick";
+  if (preset === "full") select.value = "top50";
+  syncSectorPresetUI();
+  renderSectorScanHint();
 }
 /* 自訂篩選：掃描後以已算出的欄位過濾，不多打查詢。條件全部留空 = 不過濾 */
 function getFilters() {
@@ -1646,7 +1768,7 @@ function methodHtml() {
     "<span class='muted'>候選比較</span><span>海選預設只顯示最終通過的標的；可切換看全部，再從結果中選 2–3 檔帶入比較。候選選取與追蹤清單皆只存在本機。</span>" +
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
-    "<span class='muted'>板塊地圖</span><span>資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。可切換產業／個股、只看淨買，並回放最近 20 個交易日。</span>" +
+    "<span class='muted'>資金動能地圖</span><span>先選快速看盤（10 檔）或完整市場（50 檔），再把掃描結果放入資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。「今天先看這三件事」只彙整本次掃描資料，可切換產業／個股、只看淨買，並回放最近 20 個交易日。</span>" +
     "<span class='muted'>筆記</span><span>研究筆記只存本機 localStorage，跨裝置不會同步；僅供個人研究記錄。</span>" +
     "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件檢查，需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
     "<span class='muted'>動能 MD14</span><span>14 日漲跌幅，站穩為正；沿用原站口徑摘要。</span>" +
@@ -1705,6 +1827,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("bt-code").addEventListener("keydown", (e) => { if (e.key === "Enter") doBacktest(); });
   $("btn-dividend").addEventListener("click", doDividend);
   $("div-sort").addEventListener("change", () => { /* 下次渲染生效 */ });
+  syncSectorPresetUI();
+  renderSectorScanHint();
+  document.querySelectorAll("[data-sector-preset]").forEach((button) => button.addEventListener("click", () => setSectorPreset(button.getAttribute("data-sector-preset"))));
+  $("sec-pool").addEventListener("change", () => {
+    syncSectorPresetUI();
+    renderSectorScanHint();
+  });
   $("btn-sector").addEventListener("click", doSector);
   $("sec-view").addEventListener("change", () => {
     if (!sectorState.records.length) return;
