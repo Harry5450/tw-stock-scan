@@ -330,6 +330,75 @@ thead th { background: var(--surface-2); font-size: 12px; color: var(--muted); }
 }
 .scan-card-actions { display: flex; gap: 7px; margin-top: 10px; }
 .scan-card-actions button { flex: 1; padding: 6px 8px; font-size: 12px; }
+.chip-snapshot {
+  margin: 14px 0 4px;
+  padding: 14px;
+  border: 1px solid #b9d4f5;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, .09), rgba(20, 184, 166, .035) 62%, transparent);
+}
+[data-theme="dark"] .chip-snapshot { border-color: #30578a; }
+.chip-snapshot-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.chip-snapshot h3 { margin: 1px 0 0; font-size: 16px; }
+.chip-snapshot .sub { margin: 6px 0 10px; }
+.chip-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.chip-metric {
+  min-height: 84px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.chip-metric.total { border-color: #8dc3ff; }
+.chip-metric span, .chip-metric small { display: block; }
+.chip-metric > span { color: var(--muted); font-size: 11.5px; }
+.chip-metric b { display: block; margin-top: 2px; font-size: 18px; line-height: 1.25; }
+.chip-metric small { margin-top: 5px; color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.chip-metric small span { display: inline; }
+.chip-snapshot-note { display: flex; gap: 7px; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.chip-snapshot-note b { color: var(--text); flex: none; }
+.chip-filter-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  margin: 12px 0 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, .055), transparent 62%), var(--surface-2);
+}
+.chip-filter-panel b { display: block; margin-top: 1px; font-size: 15px; }
+.chip-filter-panel .sub { margin: 3px 0 0; }
+.chip-filter-panel .row { gap: 7px; }
+.saved-filter-row { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.change-report { display: grid; gap: 8px; }
+.change-card {
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, .035), transparent 58%), var(--surface);
+}
+.change-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.change-card-head button { padding: 5px 8px; font-size: 12px; }
+.change-list { margin: 8px 0 0; padding-left: 0; list-style: none; font-size: 12.5px; }
+.change-list li { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; color: var(--text); }
+.change-tag {
+  flex: none;
+  min-width: 34px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 10.5px;
+  font-weight: 800;
+  text-align: center;
+}
+.change-tag.open { border-color: var(--ok-border); background: var(--ok-bg); color: var(--up); }
+.change-tag.clear { border-color: var(--bad-border); background: var(--bad-bg); color: var(--down); }
+.change-tag.shift { border-color: #b9d4f5; background: #eef6ff; color: var(--brand-2); }
+[data-theme="dark"] .change-tag.shift { border-color: #30578a; background: #132745; color: #9cc1ff; }
 .section-kicker {
   display: block;
   color: var(--brand-2);
@@ -550,6 +619,8 @@ dialog .dlg-body { padding: 18px; background: var(--surface); color: var(--text)
   .sector-toolbar button { min-height: 40px; }
   .sector-gesture-hint { line-height: 1.45; }
   .sector-ranking-head { align-items: flex-end; }
+  .chip-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chip-filter-panel { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 560px) {
   .brand p { display: none; }
@@ -573,4 +644,7 @@ dialog .dlg-body { padding: 18px; background: var(--surface); color: var(--text)
   .sector-toolbar select { max-width: 100%; }
   .sector-toolbar .row:last-child { gap: 6px; }
   .sector-toolbar .row:last-child button { flex: 1 1 auto; }
+  .chip-metrics { grid-template-columns: 1fr; }
+  .chip-snapshot-note { display: block; }
+  .chip-snapshot-note b { display: block; margin-bottom: 2px; }
 }

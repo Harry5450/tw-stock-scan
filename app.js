@@ -9,6 +9,10 @@ const LS_WATCH = "twscan.watch";
 const LS_THEME = "twscan.theme";
 const LS_COLOR_MODE = "twscan.price_color_mode";
 const LS_STOCK_INFO = "twscan.stock-info.v1";
+const LS_CHIP_PRESET = "twscan.chip_preset.v1";
+const LS_SAVED_CHIP_FILTERS = "twscan.saved_chip_filters.v1";
+const LS_ALERT_STATE = "twscan.alert_state.v2";
+const LS_DAILY_STATE = "twscan.daily_state.v2";
 const STOCK_INFO_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TOP50 = ["2330","2317","2454","2308","2303","2881","2882","2891","2892","2886","2885","2884","5880","2880","2887","2002","1301","1303","1326","1216","2207","2603","2615","2618","2629","2412","3711","3034","3037","6669","2379","2382","2357","3231","3661","3443","2345","2356","2360","2395","2408","3008","6415","1590","2049","2105","2327","2376","2883","2889"];
@@ -146,6 +150,11 @@ function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return Math.round(n).toLocaleString("zh-Hant");
 }
+function fmtSignedLots(value, digits = 0) {
+  const lots = (Number(value) || 0) / 1000;
+  return (lots > 0 ? "+" : "") + fmtNum(lots, digits);
+}
+function valueTone(value) { return value > 0 ? "up" : value < 0 ? "down" : "muted"; }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function getToken() { return localStorage.getItem(LS_TOKEN) || ""; }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -313,6 +322,63 @@ async function resolveName(code, force) {
   return code;
 }
 
+function buildChipSnapshot(byDate, dates) {
+  const windowSum = (key, days, offset = 0) => {
+    const end = Math.max(0, dates.length - offset);
+    const start = Math.max(0, end - days);
+    return dates.slice(start, end).reduce((sum, date) => sum + (Number(byDate[date] && byDate[date][key]) || 0), 0);
+  };
+  const total = (days, offset = 0) => windowSum("foreign", days, offset) + windowSum("trust", days, offset) + windowSum("dealer", days, offset);
+  const foreign = { d1: windowSum("foreign", 1), d5: windowSum("foreign", 5), d20: windowSum("foreign", 20) };
+  const trust = { d1: windowSum("trust", 1), d5: windowSum("trust", 5), d20: windowSum("trust", 20) };
+  const dealer = { d1: windowSum("dealer", 1), d5: windowSum("dealer", 5), d20: windowSum("dealer", 20) };
+  const net1 = total(1);
+  const net5 = total(5);
+  const net20 = total(20);
+  const prior5 = total(5, 5);
+  const acceleration = net5 - prior5;
+  let strength = 0;
+  if (net1 > 0) strength += 1;
+  if (net5 > 0) strength += 1;
+  if (net20 > 0) strength += 1;
+  if (foreign.d5 > 0 && trust.d5 > 0) strength += 1;
+  if (acceleration > 0) strength += 1;
+
+  let stateKey = "mixed", label = "法人方向分歧", detail = "短中期法人方向尚未形成一致，先看連續性與價格是否配合。";
+  if (foreign.d5 > 0 && trust.d5 > 0 && net5 > 0) {
+    stateKey = "consensus-buy";
+    label = "法人共識偏多";
+    detail = "外資與投信近 5 日同步淨買，適合再用價格結構確認。";
+  } else if (net5 > 0 && prior5 <= 0) {
+    stateKey = "turning-up";
+    label = "法人由賣轉買";
+    detail = "近 5 日法人轉為淨買，仍需觀察是否能延續到中期。";
+  } else if (net5 < 0 && prior5 >= 0) {
+    stateKey = "turning-down";
+    label = "法人由買轉賣";
+    detail = "近 5 日法人轉為淨賣，留意價格是否跌破重要均線。";
+  } else if (foreign.d5 < 0 && trust.d5 < 0 && net5 < 0) {
+    stateKey = "consensus-sell";
+    label = "法人共識偏空";
+    detail = "外資與投信近 5 日同步淨賣，暫以風險控管為主。";
+  } else if (net5 > 0) {
+    stateKey = "buying";
+    label = "法人偏買";
+    detail = "近 5 日法人合計淨買，但尚未形成雙方同步的共識。";
+  } else if (net5 < 0) {
+    stateKey = "selling";
+    label = "法人偏賣";
+    detail = "近 5 日法人合計淨賣，先觀察賣壓是否收斂。";
+  }
+  const tone = strength >= 4 ? "good" : strength <= 1 ? "bad" : "warn";
+  return {
+    date: dates[dates.length - 1] || "—",
+    foreign, trust, dealer,
+    net1, net5, net20, prior5, acceleration,
+    strength, tone, stateKey, label, detail,
+  };
+}
+
 async function analyze(code, { force = false } = {}) {
   code = normalizeCode(code);
   if (!isSecurityCode(code)) throw new Error("代號格式不正確：" + code);
@@ -371,6 +437,7 @@ async function analyze(code, { force = false } = {}) {
     return n;
   };
   const fStreak = streak("foreign"), tStreak = streak("trust");
+  const chipSnapshot = buildChipSnapshot(byDate, dates);
 
   const bias20 = ma20[i] ? ((closes[i] - ma20[i]) / ma20[i]) * 100 : null;
   const win60 = closes.slice(Math.max(0, i - 59));
@@ -386,6 +453,7 @@ async function analyze(code, { force = false } = {}) {
   const histUp3 = hist[i] > 0 && hist[i - 1] > 0 && hist[i - 2] > 0 && hist[i] >= hist[i - 1] && hist[i - 1] >= hist[i - 2];
   dims.push({ key: "MACD 柱狀", score: hist[i] > 0 ? (histUp3 ? 1 : 0.5) : 0, desc: "柱狀值 " + fmtNum(hist[i]) + (histUp3 ? "，連續擴張" : hist[i] > 0 ? "，翻紅但未連續擴張" : "，翻空") });
   const gold = (K[i] !== null && D[i] !== null && K[i - 1] !== null && D[i - 1] !== null && K[i - 1] <= D[i - 1] && K[i] > D[i]);
+  const dead = (K[i] !== null && D[i] !== null && K[i - 1] !== null && D[i - 1] !== null && K[i - 1] >= D[i - 1] && K[i] < D[i]);
   const macdGold = dif[i - 1] <= dea[i - 1] && dif[i] > dea[i];
   dims.push({ key: "DIF/DEA", score: (macdGold || (dif[i] > dea[i] && dif[i] > 0)) ? 1 : (dif[i] > dea[i] ? 0.5 : 0), desc: "DIF " + fmtNum(dif[i]) + " / DEA " + fmtNum(dea[i]) + (macdGold ? "，剛形成金叉" : dif[i] > dea[i] ? "，DIF 在 DEA 之上" : "，DIF 在 DEA 之下") });
   dims.push({ key: "零軸格局", score: (dif[i] > 0 && dea[i] > 0) ? 1 : 0, desc: (dif[i] > 0 && dea[i] > 0) ? "DIF、DEA 同在零軸之上" : "尚未站上零軸" });
@@ -465,13 +533,13 @@ async function analyze(code, { force = false } = {}) {
     ma5: ma5[i], ma10: ma10[i], ma20: ma20[i], ma60: ma60[i],
     rsi: rsiArr[i], k: K[i], d: D[i], dif: dif[i], dea: dea[i], hist: hist[i],
     bias20, pos60, posY, drawdown,
-    fStreak, tStreak, f5: sum5("foreign"), t5: sum5("trust"), d5: sum5("dealer"),
+    fStreak, tStreak, f5: sum5("foreign"), t5: sum5("trust"), d5: sum5("dealer"), chipSnapshot,
     lastDays, dims, total, verdict, tone,
     closes: closes.slice(-120), ma20line: ma20.slice(-120), dates: price.slice(-120).map((r) => r.date),
     volume: vols[i], sectorHistory,
     bbPos, bbState, bbUp: bbUp[i], bbDn: bbDn[i], bbMid: bbMid[i],
     obv5, obvState, md14, ret20, instFlow, flowQuad, diverge, sig, sigAll,
-    beta20, corr20,
+    beta20, corr20, histPrev: hist[i - 1], gold, dead,
   };
 }
 
@@ -552,7 +620,23 @@ async function renderStock(a) {
 
   const sigCell = (label, v) => '<div class="cell"><b>' + esc(label) + '</b><span class="num" style="font-size:18px">' + esc(v) + '</span></div>';
   const sigOrder = [["AI 綜合", a.sig.ai], ["MACD", a.sig.macd], ["位置", a.sig.pos], ["KD", a.sig.kd], ["均線", a.sig.ma], ["法人", a.sig.chip], ["OBV", a.sig.obv], ["流體", a.sig.flow]];
+  const chip = a.chipSnapshot;
+  const chipParticipant = (label, values) =>
+    '<article class="chip-metric"><span>' + esc(label) + '</span>' +
+    '<b class="num ' + valueTone(values.d5) + '">' + fmtSignedLots(values.d5) + ' 張</b>' +
+    '<small>單日 <span class="num ' + valueTone(values.d1) + '">' + fmtSignedLots(values.d1) + '</span> · 20 日 <span class="num ' + valueTone(values.d20) + '">' + fmtSignedLots(values.d20) + '</span></small></article>';
+  const chipSnapshotHtml =
+    '<section class="chip-snapshot" aria-label="盤後法人籌碼快照">' +
+    '<div class="chip-snapshot-head"><div><span class="section-kicker">CHIP SNAPSHOT</span><h3>盤後法人籌碼快照</h3></div>' +
+    '<span class="pill ' + chip.tone + '">' + esc(chip.label) + ' · 強度 ' + chip.strength + ' / 5</span></div>' +
+    '<p class="sub">資料日期 ' + esc(chip.date) + ' · 5 日淨額為主，單日與 20 日用來辨識短中期是否一致；不等同主力或分點資料。</p>' +
+    '<div class="chip-metrics">' +
+    chipParticipant("外資", chip.foreign) + chipParticipant("投信", chip.trust) + chipParticipant("自營", chip.dealer) +
+    '<article class="chip-metric total"><span>三大法人合計</span><b class="num ' + valueTone(chip.net5) + '">' + fmtSignedLots(chip.net5) + ' 張</b>' +
+    '<small>前 5 日 <span class="num ' + valueTone(chip.prior5) + '">' + fmtSignedLots(chip.prior5) + '</span> · 動能差 <span class="num ' + valueTone(chip.acceleration) + '">' + fmtSignedLots(chip.acceleration) + '</span></small></article></div>' +
+    '<div class="chip-snapshot-note"><b>' + esc(chip.label) + '</b><span>' + esc(chip.detail) + '</span></div></section>';
   $("stock-body").innerHTML =
+    chipSnapshotHtml +
     '<h3>六維度結構評分</h3><div class="matrix">' + a.dims.map(dimRow).join("") + '</div>' +
     '<div class="grid-3" style="margin-top:12px">' +
     '<div class="cell"><b>RSI(14)</b><span class="num" style="font-size:20px">' + fmtNum(a.rsi, 1) + '</span><br><span class="muted">' + (a.rsi === null ? "資料不足" : a.rsi >= 70 ? "過熱區" : a.rsi <= 30 ? "超賣區" : "中性區") + '</span></div>' +
@@ -635,6 +719,7 @@ function momentumText(a) {
   return parts.join("；") + "。";
 }
 function chipText(a) {
+  if (a.chipSnapshot) return a.chipSnapshot.label + "：" + a.chipSnapshot.detail;
   if (a.fStreak >= 3 && a.tStreak >= 3) return "外資與投信同步連買 " + a.fStreak + " / " + a.tStreak + " 日，法人共識偏多。";
   if (a.fStreak >= 3) return "外資連買 " + a.fStreak + " 日，投信連 " + a.tStreak + " 日。";
   if (a.tStreak >= 3) return "投信連買 " + a.tStreak + " 日，外資連 " + a.fStreak + " 日。";
@@ -684,6 +769,146 @@ async function doAnalyze(codeRaw, { force = false } = {}) {
 }
 
 /* ---------- 掃描 ---------- */
+const CHIP_PRESETS = {
+  none: {
+    label: "不套用額外籌碼條件",
+    desc: "保留上方掃描模式與自訂篩選，不再額外限縮法人條件。",
+  },
+  consensus: {
+    label: "法人共識偏多",
+    desc: "外資、投信近 5 日皆淨買，且至少一方連買 3 日以上。",
+  },
+  turnUp: {
+    label: "法人由賣轉買",
+    desc: "近 5 日法人轉為淨買、前 5 日仍偏賣，且收盤已站上 MA20。",
+  },
+  confirmation: {
+    label: "籌碼＋技術確認",
+    desc: "近 5 日法人淨買，並且 MACD 翻紅、收盤在 MA20 之上。",
+  },
+  dipBuy: {
+    label: "逢低法人回補",
+    desc: "近 5 日法人淨買、20 日股價仍未上漲且位於 60 日區間中段以下。",
+  },
+  riskOff: {
+    label: "法人減碼警戒",
+    desc: "近 5 日法人淨賣、至少一方連賣 3 日，且收盤跌破 MA20；用於風險檢視，不是放空建議。",
+  },
+};
+function isChipPreset(key) { return Object.prototype.hasOwnProperty.call(CHIP_PRESETS, key); }
+function storedChipPreset() {
+  try {
+    const key = localStorage.getItem(LS_CHIP_PRESET) || "none";
+    return isChipPreset(key) ? key : "none";
+  } catch (e) { return "none"; }
+}
+function getChipPreset() {
+  const select = $("chip-preset");
+  return select && isChipPreset(select.value) ? select.value : storedChipPreset();
+}
+function renderChipPresetDescription() {
+  const key = getChipPreset();
+  const preset = CHIP_PRESETS[key] || CHIP_PRESETS.none;
+  const host = $("chip-preset-desc");
+  if (host) host.textContent = preset.desc + " 條件會與上方掃描模式及下方自訂篩選一起套用。";
+}
+function setChipPreset(key) {
+  const actual = isChipPreset(key) ? key : "none";
+  const select = $("chip-preset");
+  if (select) select.value = actual;
+  try { localStorage.setItem(LS_CHIP_PRESET, actual); } catch (e) { /* 僅本次使用 */ }
+  renderChipPresetDescription();
+  return actual;
+}
+function chipPresetResult(a, key) {
+  const actual = isChipPreset(key) ? key : "none";
+  const chip = a.chipSnapshot || {};
+  const net5 = Number(chip.net5 || 0);
+  const prior5 = Number(chip.prior5 || 0);
+  let pass = true;
+  if (actual === "consensus") pass = a.f5 > 0 && a.t5 > 0 && (a.fStreak >= 3 || a.tStreak >= 3);
+  if (actual === "turnUp") pass = net5 > 0 && prior5 <= 0 && !!a.ma20 && a.last.close > a.ma20;
+  if (actual === "confirmation") pass = net5 > 0 && a.hist > 0 && !!a.ma20 && a.last.close > a.ma20;
+  if (actual === "dipBuy") pass = net5 > 0 && a.ret20 <= 0 && a.pos60 <= 60;
+  if (actual === "riskOff") pass = net5 < 0 && (a.fStreak <= -3 || a.tStreak <= -3) && !!a.ma20 && a.last.close < a.ma20;
+  return { pass, label: CHIP_PRESETS[actual].label, reason: CHIP_PRESETS[actual].desc };
+}
+function applyScanCriteria(a, mode, chipPreset, filters) {
+  a._scanScore = scoreByMode(a, mode);
+  a._modePass = passMode(a, mode);
+  const chip = chipPresetResult(a, chipPreset);
+  a._chipPresetKey = chipPreset;
+  a._chipPresetPass = chip.pass;
+  a._chipPresetNote = chip.reason;
+  a._filterBad = filterFailReasons(a, filters);
+  a._pass = a._modePass && a._chipPresetPass && a._filterBad.length === 0;
+  return a;
+}
+function getSavedChipFilters() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(LS_SAVED_CHIP_FILTERS) || "[]");
+    return Array.isArray(rows) ? rows.filter((row) => row && row.id && row.name).slice(0, 20) : [];
+  } catch (e) { return []; }
+}
+function setSavedChipFilters(rows) {
+  try { localStorage.setItem(LS_SAVED_CHIP_FILTERS, JSON.stringify(rows.slice(0, 20))); } catch (e) { /* 儲存空間不足時保留本次設定 */ }
+}
+function renderSavedChipFilters(selectedID) {
+  const select = $("saved-chip-filter");
+  if (!select) return;
+  const wanted = selectedID || select.value || "";
+  const rows = getSavedChipFilters();
+  select.innerHTML = '<option value="">選擇一組條件</option>' + rows.map((row) =>
+    '<option value="' + esc(row.id) + '">' + esc(row.name) + '</option>'
+  ).join("");
+  select.value = rows.some((row) => row.id === wanted) ? wanted : "";
+  const del = $("btn-chip-filter-delete");
+  if (del) del.disabled = !select.value;
+}
+function saveCurrentChipFilter() {
+  const input = $("saved-chip-filter-name");
+  const name = input ? input.value.trim().slice(0, 40) : "";
+  const msg = $("chip-filter-msg");
+  if (!name) { if (msg) msg.textContent = "請先替這組條件命名。"; return; }
+  const rows = getSavedChipFilters();
+  const existing = rows.find((row) => row.name === name);
+  const record = {
+    id: existing ? existing.id : "chip-" + Date.now(),
+    name,
+    mode: $("mode").value,
+    chipPreset: getChipPreset(),
+    filters: getFilters(),
+    updated: fmtDate(new Date()),
+  };
+  const next = existing ? rows.map((row) => row.id === existing.id ? record : row) : [record].concat(rows);
+  setSavedChipFilters(next);
+  renderSavedChipFilters(record.id);
+  if (input) input.value = "";
+  if (msg) msg.textContent = "已儲存「" + name + "」；包含掃描模式、籌碼條件與自訂篩選。";
+}
+function loadSavedChipFilter() {
+  const select = $("saved-chip-filter");
+  const msg = $("chip-filter-msg");
+  const record = getSavedChipFilters().find((row) => row.id === (select && select.value));
+  if (!record) { if (msg) msg.textContent = "請先選擇要載入的條件。"; return; }
+  const hasMode = Array.from($("mode").options).some((option) => option.value === record.mode);
+  if (hasMode) $("mode").value = record.mode;
+  setChipPreset(record.chipPreset);
+  setFilters(record.filters || {});
+  writeFilterInputs(getFilters());
+  if (msg) msg.textContent = "已載入「" + record.name + "」。";
+  if (lastScan && lastScan.list.length) applyFiltersToLastScan();
+}
+function deleteSavedChipFilter() {
+  const select = $("saved-chip-filter");
+  const id = select && select.value;
+  const msg = $("chip-filter-msg");
+  if (!id) { if (msg) msg.textContent = "請先選擇要刪除的條件。"; return; }
+  const currentName = getSavedChipFilters().find((row) => row.id === id);
+  setSavedChipFilters(getSavedChipFilters().filter((row) => row.id !== id));
+  renderSavedChipFilters();
+  if (msg) msg.textContent = "已刪除「" + (currentName ? currentName.name : "此條件") + "」。";
+}
 function scoreByMode(a, mode) {
   if (mode === "macd") return a.total;
   if (mode === "inst") return Math.max(a.fStreak, 0) + Math.max(a.tStreak, 0) + (a.f5 > 0 ? 1 : 0) + (a.t5 > 0 ? 1 : 0);
@@ -771,12 +996,17 @@ const scanSelected = new Set();
 function renderScanSummary(list) {
   const total = list.length;
   const modePass = list.filter((a) => a._modePass).length;
+  const chipPass = list.filter((a) => a._modePass && a._chipPresetPass).length;
   const passed = list.filter((a) => a._pass).length;
-  const filtered = Math.max(0, modePass - passed);
+  const filtered = Math.max(0, chipPass - passed);
+  const chipPreset = (lastScan && lastScan.chipPreset) || "none";
+  const chipSummary = chipPreset !== "none"
+    ? '<div class="summary-stat"><b class="num">' + chipPass + '</b><span class="muted">籌碼條件符合</span></div>' : "";
   $("scan-summary").innerHTML = total ?
     '<div class="summary-stat"><b class="num">' + total + '</b><span class="muted">已完成分析</span></div>' +
     '<div class="summary-stat good"><b class="num">' + passed + '</b><span class="muted">最終通過</span></div>' +
     '<div class="summary-stat"><b class="num">' + modePass + '</b><span class="muted">模式符合</span></div>' +
+    chipSummary +
     '<div class="summary-stat"><b class="num">' + filtered + '</b><span class="muted">被自訂篩選排除</span></div>' : '';
 }
 function renderScanWorkbench() {
@@ -808,6 +1038,7 @@ async function doScan() {
   if (scanning) return;
   const poolSel = $("pool").value;
   const mode = $("mode").value;
+  const chipPreset = setChipPreset(getChipPreset());
   const pool = poolCodes(poolSel);
   if (!pool.length) {
     $("scan-status").textContent = poolSel === "custom" ? "自訂池是空的，請在下方輸入代號後儲存。"
@@ -823,7 +1054,7 @@ async function doScan() {
   $("scan-summary").innerHTML = "";
   scanSelected.clear();
   $("scan-workbench").hidden = true;
-  lastScan = { list: [], mode };
+  lastScan = { list: [], mode, chipPreset };
   let ok = 0, fail = 0;
   for (let idx = 0; idx < pool.length; idx++) {
     const code = pool[idx];
@@ -832,13 +1063,11 @@ async function doScan() {
     try {
       const a = await analyze(code);
       ok++;
-      a._scanScore = scoreByMode(a, mode);
-      a._modePass = passMode(a, mode);
-      // 殖利率只對「模式已通過」的補查，不通過的不多耗額度
-      if (needYield && a._modePass) a.divYield = await divYieldFor(code);
-      a._yieldFetched = needYield && a._modePass;
-      a._filterBad = filterFailReasons(a, filters);
-      a._pass = a._modePass && a._filterBad.length === 0;
+      applyScanCriteria(a, mode, chipPreset, filters);
+      // 殖利率只對已通過掃描模式與籌碼條件者補查，不通過的不多耗額度。
+      if (needYield && a._modePass && a._chipPresetPass) a.divYield = await divYieldFor(code);
+      a._yieldFetched = needYield && a._modePass && a._chipPresetPass;
+      applyScanCriteria(a, mode, chipPreset, filters);
       lastScan.list.push(a);
       renderScan(lastScan.list, mode);
     } catch (e) {
@@ -848,26 +1077,30 @@ async function doScan() {
   }
   $("scan-bar").style.width = "100%";
   const passed = lastScan.list.filter((a) => a._pass).length;
-  const filteredOut = lastScan.list.filter((a) => a._modePass && !a._pass).length;
+  const chipOut = lastScan.list.filter((a) => a._modePass && !a._chipPresetPass).length;
+  const filteredOut = lastScan.list.filter((a) => a._modePass && a._chipPresetPass && !a._pass).length;
   $("scan-status").textContent = "完成：「" + poolLabel(poolSel) + "」共 " + pool.length + " 檔，成功 " + ok + "，失敗 " + fail +
-    "，通過 " + passed + " 檔" + (filtersActive(filters) ? "（自訂篩選排除 " + filteredOut + " 檔）" : "") + "。";
+    "，通過 " + passed + " 檔" + (chipPreset !== "none" ? "（「" + CHIP_PRESETS[chipPreset].label + "」排除 " + chipOut + " 檔）" : "") +
+    (filtersActive(filters) ? "（自訂篩選排除 " + filteredOut + " 檔）" : "") + "。";
   scanning = false;
   $("btn-scan").disabled = false;
 }
 async function applyFiltersToLastScan() {
   const filters = readFilterInputs();
+  const chipPreset = setChipPreset(getChipPreset());
   if (!lastScan || !lastScan.list.length) {
     $("filter-msg").textContent = "篩選條件已儲存，下次掃描生效。";
     return;
   }
+  lastScan.chipPreset = chipPreset;
   const needYield = filters.yMin !== null && !isNaN(filters.yMin);
   let fetched = 0;
   for (const a of lastScan.list) {
-    // 掃描後才加殖利率條件：只對模式通過但還沒查過殖利率的補查
-    if (needYield && a._modePass && !a._yieldFetched) { a.divYield = await divYieldFor(a.code); a._yieldFetched = true; fetched++; await sleep(300); }
+    applyScanCriteria(a, lastScan.mode, chipPreset, filters);
+    // 掃描後才加殖利率條件：只對模式與籌碼條件通過但尚未查過者補查。
+    if (needYield && a._modePass && a._chipPresetPass && !a._yieldFetched) { a.divYield = await divYieldFor(a.code); a._yieldFetched = true; fetched++; await sleep(300); }
     if (!needYield) { /* 條件清空後沿用舊值即可 */ }
-    a._filterBad = filterFailReasons(a, filters);
-    a._pass = a._modePass && a._filterBad.length === 0;
+    applyScanCriteria(a, lastScan.mode, chipPreset, filters);
   }
   renderScan(lastScan.list, lastScan.mode);
   const passed = lastScan.list.filter((a) => a._pass).length;
@@ -893,6 +1126,10 @@ function renderScan(list, mode) {
       : "";
     const filtNote = (a._filterBad && a._filterBad.length)
       ? '<div class="muted" style="font-size:12px">篩選排除：' + esc(a._filterBad.join("、")) + '</div>' : "";
+    const chipPresetNote = a._chipPresetKey && a._chipPresetKey !== "none"
+      ? '<div class="muted" style="font-size:12px">籌碼條件：' + (a._chipPresetPass ? "符合" : "未符合") + " · " + esc(a._chipPresetNote) + '</div>' : "";
+    const chipState = a.chipSnapshot
+      ? '<div class="muted" style="font-size:12px">' + esc(a.chipSnapshot.label) + ' · 法人 5 日 <span class="num ' + valueTone(a.chipSnapshot.net5) + '">' + fmtSignedLots(a.chipSnapshot.net5) + ' 張</span></div>' : "";
     const picked = scanSelected.has(a.code);
     const watched = getWatch().some((x) => x.code === a.code);
     return '<div class="stock-card' + (a._pass ? ' scan-pass' : '') + (picked ? ' scan-picked' : '') + '" data-code="' + esc(a.code) + '" style="cursor:pointer">' +
@@ -900,7 +1137,7 @@ function renderScan(list, mode) {
       '<span class="score ' + dir + '">' + fmtNum(a._pass ? a.total : a._scanScore, 1) + '</span></div>' +
       '<div class="num ' + dir + '" style="font-size:20px;font-weight:700">' + fmtNum(a.last.close) + ' <span style="font-size:12px">' + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + '%</span></div>' +
       '<div style="margin:6px 0">' + verdictPill(a) + ' ' + (a._pass ? '<span class="pill good">通過</span>' : '<span class="pill">未通過</span>') + '</div>' +
-      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + extra + filtNote +
+      '<div class="muted" style="font-size:12px">外資連 ' + a.fStreak + ' 日 · 投信連 ' + a.tStreak + ' 日 · RSI ' + fmtNum(a.rsi, 0) + ' · 距60日高 ' + fmtNum(a.drawdown, 1) + '%</div>' + chipState + extra + chipPresetNote + filtNote +
       '<div class="scan-card-actions"><button type="button" data-a="pick" data-c="' + esc(a.code) + '">' + (picked ? '取消比較' : '加入比較') + '</button>' +
       '<button type="button" data-a="watch" data-c="' + esc(a.code) + '">' + (watched ? '取消追蹤' : '加入追蹤') + '</button></div>' +
       '<div class="muted" style="font-size:12px;margin-top:8px">第 ' + (idx + 1) + ' 名 · 點卡片看完整診斷</div></div>';
@@ -1838,7 +2075,13 @@ function noteSearch() {
 }
 
 /* ---------- 警示與日報（追蹤清單 × 本機定時檢查） ---------- */
-const LS_ALERT_LAST = "twscan.alert_last.v1";
+function getStateStore(key) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (e) { return {}; }
+}
+function setStateStore(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 僅本次顯示 */ } }
 function alertSettings() {
   return {
     macdUp: $("al-macd-up").checked, macdDn: $("al-macd-dn").checked,
@@ -1849,22 +2092,48 @@ function alertSettings() {
 }
 function alertCheckOne(a, s) {
   const hits = [];
+  const add = (key, label, active) => { if (active) hits.push({ key, label }); };
   const prevClose = a.prev ? a.prev.close : null;
-  if (s.macdUp && a.hist > 0) hits.push("MACD 翻紅（柱狀 " + fmtNum(a.hist) + "）");
-  if (s.macdDn && a.hist < 0 && a.hist > -0.001) hits.push("MACD 剛翻空"); // 寬鬆：柱狀轉負初期
-  if (s.macdDn && a.hist < 0) hits.push("MACD 翻空（柱狀 " + fmtNum(a.hist) + "）");
-  if (s.kdGold && a.k !== null && a.k > a.d) hits.push("KD：K 在 D 之上（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）");
-  if (s.kdDead && a.k !== null && a.k < a.d) hits.push("KD：K 跌破 D（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）");
-  if (s.above20 && prevClose !== null && prevClose <= a.ma20 && a.last.close > a.ma20) hits.push("站上 MA20（" + fmtNum(a.ma20) + "）");
-  if (s.below20 && prevClose !== null && prevClose >= a.ma20 && a.last.close < a.ma20) hits.push("跌破 MA20（" + fmtNum(a.ma20) + "）");
-  if (s.inst && (a.fStreak >= 3 || a.tStreak >= 3)) hits.push("法人連買（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）");
-  if (s.inst && (a.fStreak <= -3 || a.tStreak <= -3)) hits.push("法人連賣（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）");
+  add("macd-up", "MACD 翻紅（柱狀 " + fmtNum(a.hist) + "）", s.macdUp && a.hist > 0 && a.histPrev <= 0);
+  add("macd-down", "MACD 翻空（柱狀 " + fmtNum(a.hist) + "）", s.macdDn && a.hist < 0 && a.histPrev >= 0);
+  add("kd-gold", "KD 金叉（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）", s.kdGold && a.gold);
+  add("kd-dead", "KD 死叉（K " + fmtNum(a.k, 1) + " / D " + fmtNum(a.d, 1) + "）", s.kdDead && a.dead);
+  add("above-ma20", "站上 MA20（" + fmtNum(a.ma20) + "）", s.above20 && prevClose !== null && prevClose <= a.ma20 && a.last.close > a.ma20);
+  add("below-ma20", "跌破 MA20（" + fmtNum(a.ma20) + "）", s.below20 && prevClose !== null && prevClose >= a.ma20 && a.last.close < a.ma20);
+  add("institutional-buy", "法人連買（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）", s.inst && (a.fStreak >= 3 || a.tStreak >= 3));
+  add("institutional-sell", "法人連賣（外資連 " + a.fStreak + " 日、投信連 " + a.tStreak + " 日）", s.inst && (a.fStreak <= -3 || a.tStreak <= -3));
   return hits;
+}
+function alertEnabledKeys(s) {
+  const keys = new Set();
+  if (s.macdUp) keys.add("macd-up");
+  if (s.macdDn) keys.add("macd-down");
+  if (s.kdGold) keys.add("kd-gold");
+  if (s.kdDead) keys.add("kd-dead");
+  if (s.above20) keys.add("above-ma20");
+  if (s.below20) keys.add("below-ma20");
+  if (s.inst) { keys.add("institutional-buy"); keys.add("institutional-sell"); }
+  return keys;
+}
+function alertLabelForKey(key) {
+  const labels = {
+    "macd-up": "MACD 翻紅",
+    "macd-down": "MACD 翻空",
+    "kd-gold": "KD 金叉",
+    "kd-dead": "KD 死叉",
+    "above-ma20": "站上 MA20",
+    "below-ma20": "跌破 MA20",
+    "institutional-buy": "法人連買",
+    "institutional-sell": "法人連賣",
+  };
+  return labels[key] || key;
 }
 async function doAlertCheck() {
   const w = getWatch();
   if (!w.length) { $("alert-result").innerHTML = '<p class="muted">追蹤清單是空的，先到個股診斷加入。</p>'; return; }
   const s = alertSettings();
+  const enabled = alertEnabledKeys(s);
+  const states = getStateStore(LS_ALERT_STATE);
   $("alert-msg").textContent = "檢查中（" + w.length + " 檔）…";
   $("alert-result").innerHTML = "";
   const rows = [];
@@ -1872,60 +2141,108 @@ async function doAlertCheck() {
     try {
       const a = await analyze(x.code);
       const hits = alertCheckOne(a, s);
-      // 去重：同一代號同一條件當日只提示一次
-      let last = {};
-      try { last = JSON.parse(localStorage.getItem(LS_ALERT_LAST) || "{}"); } catch (e) { last = {}; }
-      const day = fmtDate(new Date());
-      const key = x.code + "|" + day;
-      const seen = new Set(last[key] || []);
-      const fresh = hits.filter((h) => !seen.has(h.split("（")[0]));
-      if (fresh.length) {
-        last[key] = (last[key] || []).concat(fresh.map((h) => h.split("（")[0]));
-        try { localStorage.setItem(LS_ALERT_LAST, JSON.stringify(last)); } catch (e) { /* 忽略 */ }
-      }
-      rows.push({ a, hits, fresh });
+      const hadBaseline = Object.prototype.hasOwnProperty.call(states, a.code);
+      const previous = new Set((Array.isArray(states[a.code]) ? states[a.code] : []).filter((key) => enabled.has(key)));
+      const active = new Set(hits.map((hit) => hit.key));
+      const opened = hadBaseline ? hits.filter((hit) => !previous.has(hit.key)) : [];
+      const cleared = hadBaseline ? Array.from(previous).filter((key) => !active.has(key)) : [];
+      states[a.code] = Array.from(active);
+      rows.push({ a, opened, cleared, hadBaseline });
       await sleep(350);
     } catch (e) { rows.push({ code: x.code, error: e instanceof Error ? e.message : String(e) }); }
   }
-  const anyFresh = rows.some((r) => r.fresh && r.fresh.length);
-  $("alert-msg").textContent = "檢查完成" + (anyFresh ? "：有新觸發（標示 NEW）" : "：本次無新觸發（均為今日已提示或未達條件）");
-  $("alert-result").innerHTML = rows.map((r) => {
-    if (r.error) return '<p class="muted">' + esc(r.code) + "：" + esc(r.error) + "</p>";
-    const tag = r.fresh && r.fresh.length ? ' <span class="pill good">NEW</span>' : "";
-    return '<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--border);padding:8px 0">' +
-      "<span><b>" + esc(r.a.name) + '</b> <span class="muted num">' + esc(r.a.code) + "</span> — " + (r.hits.length ? esc(r.hits.join("；")) : '<span class="muted">未達勾選條件</span>') + tag + "</span>" +
-      '<button type="button" data-c="' + esc(r.a.code) + '">開啟診斷</button></div>';
-  }).join("");
+  setStateStore(LS_ALERT_STATE, states);
+  const changed = rows.filter((row) => !row.error && (row.opened.length || row.cleared.length));
+  const baseline = rows.filter((row) => !row.error && !row.hadBaseline).length;
+  $("alert-msg").textContent = changed.length
+    ? "檢查完成：" + changed.length + " 檔出現狀態變更。"
+    : baseline
+      ? "已建立 " + baseline + " 檔追蹤基準；下次只會列出新增或解除的狀態。"
+      : "檢查完成：目前沒有新的狀態變更。";
+  $("alert-result").innerHTML = changed.length ? '<div class="change-report">' + changed.map((r) => {
+    const opened = r.opened.map((hit) => '<li><span class="change-tag open">新增</span>' + esc(hit.label) + "</li>").join("");
+    const cleared = r.cleared.map((key) => '<li><span class="change-tag clear">解除</span>' + esc(alertLabelForKey(key)) + "</li>").join("");
+    return '<article class="change-card"><div class="change-card-head"><span><b>' + esc(r.a.name) + '</b> <span class="muted num">' + esc(r.a.code) + "</span></span>" +
+      '<button type="button" data-c="' + esc(r.a.code) + '">開啟診斷</button></div><ul class="change-list">' + opened + cleared + "</ul></article>";
+  }).join("") + "</div>" : '<p class="muted">' + (baseline ? "本次只建立基準，沒有額外列出所有已存在的訊號。" : "所有啟用條件都與上次檢查一致。") + "</p>";
   document.querySelectorAll("#alert-result button").forEach((b) => b.addEventListener("click", () => doAnalyze(b.getAttribute("data-c"))));
+}
+function dailySignalSnapshot(a) {
+  const chip = a.chipSnapshot || {};
+  const trendKey = a.ma20 && a.last.close > a.ma20 ? "above-ma20" : "below-ma20";
+  const momentumKey = a.hist >= 0 ? "macd-positive" : "macd-negative";
+  const kdKey = a.k !== null && a.d !== null && a.k >= a.d ? "kd-positive" : "kd-negative";
+  const scoreKey = a.total >= 4 ? "strong" : a.total < 2.5 ? "weak" : "neutral";
+  return {
+    date: a.last && a.last.date ? a.last.date : fmtDate(new Date()),
+    chipKey: chip.stateKey || "mixed",
+    chipLabel: chip.label || "法人方向分歧",
+    trendKey,
+    trendLabel: trendKey === "above-ma20" ? "收在 MA20 之上" : "收在 MA20 之下",
+    momentumKey,
+    momentumLabel: momentumKey === "macd-positive" ? "MACD 動能偏多" : "MACD 動能偏空",
+    kdKey,
+    kdLabel: kdKey === "kd-positive" ? "KD 多方排列" : "KD 空方排列",
+    scoreKey,
+    scoreLabel: a.verdict + "（" + fmtNum(a.total, 1) + " 分）",
+  };
+}
+function diffDailySignal(previous, next) {
+  if (!previous) return { baseline: true, changes: [] };
+  const fields = [
+    ["chipKey", "chipLabel", "法人籌碼"],
+    ["trendKey", "trendLabel", "價格結構"],
+    ["momentumKey", "momentumLabel", "MACD 動能"],
+    ["kdKey", "kdLabel", "KD 結構"],
+    ["scoreKey", "scoreLabel", "綜合判讀"],
+  ];
+  return {
+    baseline: false,
+    changes: fields.filter(([key]) => previous[key] !== next[key]).map(([key, label, title]) => ({
+      title,
+      from: previous[label] || "—",
+      to: next[label] || "—",
+    })),
+  };
 }
 async function doDaily() {
   const w = getWatch();
   if (!w.length) { $("daily-result").innerHTML = '<p class="muted">追蹤清單是空的，先到個股診斷加入。</p>'; return; }
   $("alert-msg").textContent = "產出日報中（" + w.length + " 檔）…";
   $("daily-result").innerHTML = "";
+  const states = getStateStore(LS_DAILY_STATE);
   const rows = [];
   for (const x of w.slice(0, 30)) {
-    try { rows.push(await analyze(x.code)); await sleep(350); }
+    try {
+      const a = await analyze(x.code);
+      const next = dailySignalSnapshot(a);
+      const previous = states[a.code];
+      const diff = diffDailySignal(previous, next);
+      states[a.code] = next;
+      rows.push({ a, diff });
+      await sleep(350);
+    }
     catch (e) { rows.push({ code: x.code, error: e instanceof Error ? e.message : String(e) }); }
   }
-  const good = rows.filter((r) => !r.error);
-  const up = good.filter((r) => r.pct > 0).length, dn = good.filter((r) => r.pct < 0).length;
-  const strong = good.filter((r) => r.total >= 4).map((r) => r.name + r.code).join("、") || "無";
-  const weak = good.filter((r) => r.total < 2.5).map((r) => r.name + r.code).join("、") || "無";
-  const row = (label, fn) => "<tr><td>" + label + "</td>" + good.map((a) => "<td class='num'>" + fn(a) + "</td>").join("") + "</tr>";
-  $("alert-msg").textContent = "";
-  $("daily-result").innerHTML = '<h3 style="margin:4px 0">今日日報（' + fmtDate(new Date()) + '）</h3>' +
-    '<div class="kv"><span class="muted">追蹤</span><span>' + good.length + " 檔成功 · 上漲 " + up + " 檔 · 下跌 " + dn + " 檔</span>" +
-    '<span class="muted">結構強勢（≥4 分）</span><span>' + esc(strong) + '</span>' +
-    '<span class="muted">結構偏弱（<2.5 分）</span><span>' + esc(weak) + "</span></div>" +
-    '<div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>項目</th>' +
-    good.map((a) => "<th>" + esc(a.name) + " " + esc(a.code) + "</th>").join("") + "</tr></thead><tbody>" +
-    row("現價 / 漲跌", (a) => fmtNum(a.last.close) + " / " + (a.pct > 0 ? "+" : "") + fmtNum(a.pct) + "%") +
-    row("綜合 / 判讀", (a) => fmtNum(a.total, 1) + " · " + esc(a.verdict)) +
-    row("訊號矩陣", (a) => esc(a.sigAll)) +
-    row("法人", (a) => "外資連 " + a.fStreak + " 日 / 投信連 " + a.tStreak + " 日") +
-    row("位置", (a) => "60日 " + fmtNum(a.pos60, 0) + "% · 距高 " + fmtNum(a.drawdown, 1) + "%") +
-    "</tbody></table></div><div class='alert' style='margin-top:10px'>日報為收盤結構摘要，非買賣建議；盤中數值會變動，收盤後為準。</div>";
+  setStateStore(LS_DAILY_STATE, states);
+  const changed = rows.filter((row) => !row.error && row.diff.changes.length);
+  const baseline = rows.filter((row) => !row.error && row.diff.baseline).length;
+  const failures = rows.filter((row) => row.error);
+  $("alert-msg").textContent = changed.length
+    ? "日報完成：" + changed.length + " 檔出現籌碼或結構狀態變更。"
+    : baseline
+      ? "已建立 " + baseline + " 檔日報基準；下次只會列出狀態轉變。"
+      : "日報完成：目前沒有籌碼或結構狀態轉變。";
+  const cards = changed.map((row) => '<article class="change-card"><div class="change-card-head"><span><b>' + esc(row.a.name) + '</b> <span class="muted num">' + esc(row.a.code) + "</span></span>" +
+    '<button type="button" data-c="' + esc(row.a.code) + '">開啟診斷</button></div><ul class="change-list">' + row.diff.changes.map((change) => '<li><span class="change-tag shift">變更</span><b>' + esc(change.title) + "：</b>" + esc(change.from) + " → " + esc(change.to) + "</li>").join("") + "</ul></article>").join("");
+  const empty = baseline
+    ? '<p class="muted">首次建立基準，不展開全體清單；下一次日報會只顯示變更。</p>'
+    : '<p class="muted">所有追蹤股的法人籌碼、趨勢、動能與綜合判讀均與上次相同。</p>';
+  const failureHtml = failures.length ? '<p class="muted" style="margin-top:8px">未完成：' + failures.map((row) => esc(row.code)).join("、") + "</p>" : "";
+  $("daily-result").innerHTML = '<h3 style="margin:4px 0">籌碼狀態異動日報（' + fmtDate(new Date()) + "）</h3>" +
+    (cards ? '<div class="change-report">' + cards + "</div>" : empty) + failureHtml +
+    "<div class='alert' style='margin-top:10px'>僅列出與上次記錄不同的收盤狀態，作為研究優先順序，不構成買賣建議。</div>";
+  document.querySelectorAll("#daily-result button").forEach((b) => b.addEventListener("click", () => doAnalyze(b.getAttribute("data-c"))));
 }
 
 function getWatch() {
@@ -1998,9 +2315,10 @@ function methodHtml() {
     "<span class='muted'>MACD</span><span>EMA12–EMA26 為 DIF，DIF 的 9 日 EMA 為 DEA，柱狀 = 2×(DIF–DEA)。</span>" +
     "<span class='muted'>均線</span><span>MA5/10/20/60；乖離 = (收盤–MA20)/MA20。</span>" +
     "<span class='muted'>法人</span><span>FinMind 三大法人買賣超，彙總外資、投信、自營；連買賣日為同方向連續交易日。</span>" +
+    "<span class='muted'>籌碼快照</span><span>以外資、投信、自營的 1／5／20 日淨買賣超與前後 5 日變化，整理成共識偏多、由賣轉買、由買轉賣等狀態。資料是盤後公開法人資料，不包含券商分點、集保大戶或即時主力。</span>" +
     "<span class='muted'>位置</span><span>收盤在近 60 日與近一年高低區間的百分位，愈高愈接近壓力。</span>" +
     "<span class='muted'>六維度</span><span>MACD 柱狀、DIF/DEA、零軸、法人、均線、KD，各 0–1 分；法人雙買超最多 1.5 分，合計 6 分。</span>" +
-    "<span class='muted'>海選</span><span>底部探測看跌深＋法人回補＋動能；MACD 結構看六維度 ≥4；碎骨看超跌；法人連買看法人連續性。掃描有節流，大池請耐心等。</span>" +
+    "<span class='muted'>海選</span><span>底部探測看跌深＋法人回補＋動能；MACD 結構看六維度 ≥4；碎骨看超跌；法人連買看法人連續性。可再疊加「法人共識偏多、由賣轉買、籌碼＋技術確認、逢低回補、減碼警戒」等籌碼預設；命名條件只儲存在本機。掃描有節流，大池請耐心等。</span>" +
     "<span class='muted'>族群池</span><span>半導體/AI/航運/鋼鐵/塑化/金融/電信/汽車零組件/食品/紡織為固定成分（已驗證可查，掃描前去重、上限 30 檔）。軍工、衛星等主題無公開固定成分，未列入。</span>" +
     "<span class='muted'>自訂篩選</span><span>掃描後以已算出的 RSI、MA20、法人連買過濾，不多打查詢；殖利率只對模式通過者補查（每檔多 2 次查詢）。條件存本機，下次開啟沿用。</span>" +
     "<span class='muted'>候選比較</span><span>海選預設只顯示最終通過的標的；可切換看全部，再從結果中選 2–3 檔帶入比較。候選選取與追蹤清單皆只存在本機。</span>" +
@@ -2008,7 +2326,7 @@ function methodHtml() {
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
     "<span class='muted'>資金動能地圖</span><span>先選快速看盤（10 檔）或完整市場（50 檔），再把掃描結果放入資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。「今天先看這三件事」只彙整本次掃描資料；可切換產業／個股、只看關鍵 10、回放最近 20 個交易日，也可滾輪縮放或拖曳移動查看密集泡泡。</span>" +
     "<span class='muted'>筆記</span><span>研究筆記只存本機 localStorage，跨裝置不會同步；僅供個人研究記錄。</span>" +
-    "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件檢查，需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
+    "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件與法人狀態檢查；第一次建立本機基準，後續只列出新增、解除或籌碼／技術狀態轉變。需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
     "<span class='muted'>動能 MD14</span><span>14 日漲跌幅，站穩為正；沿用原站口徑摘要。</span>" +
     "<span class='muted'>訊號矩陣</span><span>AI 綜合/MACD/位置/KD/均線/法人/OBV/流體八格，多空觀投票；≥3 票差為共振，僅為方向投票。</span>" +
     "<span class='muted'>籌碼流體</span><span>法人 5 日合計（張）× 20 日漲跌的四象限：吸籌拉升 / 逢低吸籌 / 拉高出貨 / 殺跌出貨。</span>" +
@@ -2040,12 +2358,23 @@ document.addEventListener("DOMContentLoaded", () => {
     if ($("q").value.trim()) doAnalyze($("q").value, { force: true });
   });
   try { $("custom-pool").value = localStorage.getItem(LS_POOL) || ""; } catch (e) { /* 忽略 */ }
+  setChipPreset(storedChipPreset());
+  renderSavedChipFilters();
   $("btn-pool-save").addEventListener("click", () => {
     const v = $("custom-pool").value.trim();
     try { localStorage.setItem(LS_POOL, v); } catch (e) { /* 忽略 */ }
     const n = poolCodes("custom").length;
     $("pool-msg").textContent = n ? "已儲存 " + n + " 檔" : "已清空（格式：逗號或空白分隔的 4 碼代號）";
   });
+  $("btn-chip-preset-apply").addEventListener("click", () => {
+    const key = setChipPreset($("chip-preset").value);
+    $("chip-filter-msg").textContent = "已套用「" + CHIP_PRESETS[key].label + "」。";
+    if (lastScan && lastScan.list.length) applyFiltersToLastScan();
+  });
+  $("btn-chip-filter-save").addEventListener("click", saveCurrentChipFilter);
+  $("btn-chip-filter-load").addEventListener("click", loadSavedChipFilter);
+  $("btn-chip-filter-delete").addEventListener("click", deleteSavedChipFilter);
+  $("saved-chip-filter").addEventListener("change", () => { $("btn-chip-filter-delete").disabled = !$("saved-chip-filter").value; });
   $("btn-scan").addEventListener("click", doScan);
   writeFilterInputs(getFilters());
   $("btn-filter-apply").addEventListener("click", () => { applyFiltersToLastScan(); });

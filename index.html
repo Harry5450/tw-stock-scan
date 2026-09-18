@@ -123,6 +123,34 @@
       </select>
       <button id="btn-scan" class="primary" type="button">開始掃描</button>
     </div>
+    <div class="chip-filter-panel" aria-label="籌碼選股預設">
+      <div>
+        <span class="section-kicker">CHIP SCREEN</span>
+        <b>籌碼選股預設</b>
+        <p class="sub" id="chip-preset-desc">以盤後法人資料交叉驗證，條件會與上方掃描模式及下方自訂篩選一起套用。</p>
+      </div>
+      <div class="row">
+        <label for="chip-preset">條件</label>
+        <select id="chip-preset">
+          <option value="none">不套用額外籌碼條件</option>
+          <option value="consensus">法人共識偏多</option>
+          <option value="turnUp">法人由賣轉買</option>
+          <option value="confirmation">籌碼＋技術確認</option>
+          <option value="dipBuy">逢低法人回補</option>
+          <option value="riskOff">法人減碼警戒</option>
+        </select>
+        <button id="btn-chip-preset-apply" type="button">套用預設</button>
+      </div>
+    </div>
+    <div class="row saved-filter-row">
+      <label for="saved-chip-filter">已儲存條件</label>
+      <select id="saved-chip-filter"><option value="">選擇一組條件</option></select>
+      <button id="btn-chip-filter-load" type="button">載入</button>
+      <input id="saved-chip-filter-name" type="text" placeholder="例如：法人共識＋突破" style="min-width:180px" />
+      <button id="btn-chip-filter-save" type="button">儲存目前條件</button>
+      <button id="btn-chip-filter-delete" class="ghost" type="button">刪除</button>
+      <span class="muted" id="chip-filter-msg" style="font-size:12.5px"></span>
+    </div>
     <div class="row" style="margin-top:8px">
       <label for="sort">排序</label>
       <select id="sort">
@@ -210,8 +238,8 @@
   </section>
 
   <section class="card" id="tab-alerts" hidden aria-label="警示與日報">
-    <h2>警示與日報</h2>
-    <p class="sub">以追蹤清單為對象，設定收盤條件（MACD 翻紅/翻空、KD 金叉死叉、站上/跌破 MA20、法人連買賣）。本機每 60 分鐘檢查一次（開著本頁時），觸發即在頁面提示；每日日報按鈕可一鍵產出追蹤清單今日摘要。提醒：關掉頁面就不會檢查，重要價位請以券商警示為準。</p>
+    <h2>狀態變更日報</h2>
+    <p class="sub">以追蹤清單為對象，檢查收盤條件與盤後法人籌碼。頁面只顯示新成立、解除或狀態轉向的項目；首次執行會建立基準，不把所有既有數字重複列成日報。開著本頁時每 60 分鐘檢查一次，重要價位仍請以券商警示為準。</p>
     <div class="row">
       <label><input type="checkbox" id="al-macd-up" checked /> MACD 翻紅</label>
       <label><input type="checkbox" id="al-macd-dn" checked /> MACD 翻空</label>
@@ -222,8 +250,8 @@
       <label><input type="checkbox" id="al-inst" checked /> 法人連 3 買/賣</label>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="btn-alert-check" class="primary" type="button">立即檢查</button>
-      <button id="btn-daily" type="button">產出今日日報</button>
+      <button id="btn-alert-check" class="primary" type="button">檢查狀態變更</button>
+      <button id="btn-daily" type="button">產出籌碼異動日報</button>
       <span class="muted" id="alert-msg" style="font-size:12.5px"></span>
     </div>
     <div id="alert-result" style="margin-top:12px"></div>
