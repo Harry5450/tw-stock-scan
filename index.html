@@ -17,13 +17,43 @@
     <div class="top-actions">
       <button id="btn-token" type="button">API Token</button>
       <button id="btn-method" type="button">方法說明</button>
+      <button id="btn-colors" type="button" aria-label="切換漲跌顏色">紅漲綠跌</button>
       <button id="btn-theme" type="button" aria-label="切換深淺色">深色</button>
     </div>
   </div>
 </header>
 
 <main class="layout">
-  <section class="card" aria-label="搜尋">
+  <section class="market-hero" aria-label="今日盤面總覽">
+    <div class="market-hero-copy">
+      <span class="section-kicker">TW MARKET PULSE</span>
+      <h2>先看資金，再看個股</h2>
+      <p>用法人流向快速定位正在轉強、降溫與賣壓收斂的方向；再下鑽到個股確認結構，不把單一訊號當成交易建議。</p>
+      <div class="market-hero-actions">
+        <button id="btn-open-sector" class="primary" type="button">建立今日資金地圖</button>
+        <button id="btn-open-watch" type="button">查看我的追蹤</button>
+      </div>
+      <div id="market-summary" class="market-summary">建立資金地圖後，這裡會顯示本次掃描最值得優先查看的方向。</div>
+    </div>
+    <div class="market-quote" aria-live="polite">
+      <div class="market-quote-head">
+        <span>加權指數</span>
+        <span id="market-status" class="market-status">讀取收盤資料中</span>
+      </div>
+      <strong id="market-index" class="num">—</strong>
+      <span id="market-change" class="market-change num">—</span>
+      <span id="market-date" class="market-date">資料來源 FinMind</span>
+    </div>
+  </section>
+
+  <section class="card search-card" aria-label="搜尋">
+    <div class="search-card-head">
+      <div>
+        <span class="section-kicker">STOCK LOOKUP</span>
+        <b>個股結構診斷</b>
+      </div>
+      <span class="muted">輸入股號或完整名稱</span>
+    </div>
     <div class="row">
       <label class="sr" for="q">股票代號或名稱</label>
       <input id="q" type="text" placeholder="輸入代號或名稱，例如 2330 或 台積電" autocomplete="off" style="flex:2;min-width:220px" />
@@ -245,8 +275,20 @@
   </section>
 
   <section class="card" id="tab-sector" hidden aria-label="板塊資金動能地圖">
-    <h2>今日資金動能地圖</h2>
+    <div class="section-heading">
+      <div>
+        <span class="section-kicker">FLOW RADAR</span>
+        <h2>今日資金動能地圖</h2>
+      </div>
+      <span id="sector-freshness" class="freshness">完成掃描後顯示資料日期</span>
+    </div>
     <p class="sub">先用法人流向找出正在轉強、轉弱或降溫的板塊，再下鑽個股確認。越右＝近 5 日法人買越多；越上＝法人流向相對前 15 日轉強；泡泡越大＝近 20 日均量越大。</p>
+    <div class="map-legend" aria-label="資金動能四象限說明">
+      <span class="legend-item tide">漲潮 <small>買超加速</small></span>
+      <span class="legend-item rotation">輪動 <small>買超放緩</small></span>
+      <span class="legend-item watch">觀望 <small>賣超收斂</small></span>
+      <span class="legend-item ebb">退潮 <small>賣超加速</small></span>
+    </div>
     <div class="sector-start" aria-label="建立今日地圖">
       <div class="sector-start-copy">
         <span class="section-kicker">STEP 1</span>
@@ -296,14 +338,19 @@
           <option value="stock">依個股</option>
         </select>
         <label><input id="sec-buy-only" type="checkbox" disabled /> 只看法人淨買</label>
+        <label><input id="sec-hot-only" type="checkbox" disabled /> 只看關鍵 10</label>
       </div>
       <div class="row">
         <button id="btn-sector-play" type="button" disabled>播放 20 日回放</button>
         <label for="sec-offset">回放</label>
         <input id="sec-offset" type="range" min="0" max="0" value="0" disabled />
         <span id="sec-date" class="pill">尚未掃描</span>
+        <button id="btn-sector-zoom-in" type="button" disabled>放大</button>
+        <button id="btn-sector-zoom-out" type="button" disabled>縮小</button>
+        <button id="btn-sector-reset" class="ghost" type="button" disabled>重設視圖</button>
       </div>
     </div>
+    <p class="sector-gesture-hint">滾輪縮放、拖曳移動；點泡泡看明細。行動裝置可用放大／縮小按鈕聚焦地圖。</p>
     <div id="sector-insight" class="sector-insight" aria-live="polite"></div>
     <div id="sector-focus" class="sector-focus" aria-live="polite">
       <div class="sector-focus-head">
@@ -318,7 +365,7 @@
       </div>
     </div>
     <div class="sector-map-shell" aria-live="polite">
-      <div id="sector-chart" class="sector-chart" role="img" aria-label="板塊資金動能地圖"></div>
+      <div id="sector-chart" class="sector-chart" role="region" aria-label="可互動的板塊資金動能地圖"></div>
       <div id="sector-tooltip" class="sector-tooltip" hidden></div>
     </div>
     <div id="sector-detail" class="sector-detail"></div>

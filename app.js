@@ -7,6 +7,7 @@ const FINMIND = "https://api.finmindtrade.com/api/v4/data";
 const LS_TOKEN = "twscan.finmind_token";
 const LS_WATCH = "twscan.watch";
 const LS_THEME = "twscan.theme";
+const LS_COLOR_MODE = "twscan.price_color_mode";
 const LS_STOCK_INFO = "twscan.stock-info.v1";
 const STOCK_INFO_CACHE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -32,6 +33,7 @@ const SECTOR_KEYS = Object.keys(SECTOR_POOLS);
 
 const memCache = new Map();
 const $ = (id) => document.getElementById(id);
+let marketSnapshot = null;
 
 /* localStorage 持久快取：FinMind 日線與法人資料當日有效，減少重複查詢 */
 const LS_PFX = "twscan.cache.v1.";
@@ -169,6 +171,54 @@ async function finmind(dataset, dataId, startDate, endDate, { force = false } = 
   memCache.set(key, data);
   if (dataset === "TaiwanStockPrice" || dataset === "TaiwanStockInstitutionalInvestorsBuySell" || dataset === "TaiwanStockDividend") lsSet(key, data);
   return data;
+}
+
+/* ---------- 首屏市場脈動 ---------- */
+function applyPriceColors(mode) {
+  const actual = mode === "us" ? "us" : "tw";
+  document.documentElement.setAttribute("data-price-colors", actual);
+  try { localStorage.setItem(LS_COLOR_MODE, actual); } catch (e) { /* 無痕模式仍可本次使用 */ }
+  const button = $("btn-colors");
+  if (button) {
+    button.textContent = actual === "tw" ? "紅漲綠跌" : "綠漲紅跌";
+    button.setAttribute("aria-label", actual === "tw" ? "目前紅漲綠跌，點擊切換為綠漲紅跌" : "目前綠漲紅跌，點擊切換為紅漲綠跌");
+  }
+}
+async function loadMarketSnapshot({ force = false } = {}) {
+  const status = $("market-status");
+  const index = $("market-index");
+  const change = $("market-change");
+  const date = $("market-date");
+  if (!status || !index || !change || !date) return null;
+  status.textContent = "讀取收盤資料中";
+  try {
+    const end = fmtDate(new Date());
+    const start = fmtDate(addDays(new Date(), -16));
+    const rows = await finmind("TaiwanStockPrice", "TAIEX", start, end, { force });
+    const ordered = rows.slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const last = ordered[ordered.length - 1];
+    const prev = ordered[ordered.length - 2] || last;
+    if (!last || !Number.isFinite(Number(last.close))) throw new Error("大盤收盤資料不足");
+    const close = Number(last.close);
+    const prevClose = Number(prev && prev.close);
+    const pct = prevClose ? (close - prevClose) / prevClose * 100 : 0;
+    const tone = pct > 0 ? "up" : pct < 0 ? "down" : "muted";
+    marketSnapshot = { date: String(last.date || ""), close, pct };
+    index.textContent = fmtNum(close, 2);
+    change.className = "market-change num " + tone;
+    change.textContent = (pct > 0 ? "+" : "") + fmtNum(pct, 2) + "%" + (prevClose ? " · " + (close - prevClose >= 0 ? "+" : "") + fmtNum(close - prevClose, 2) : "");
+    date.textContent = "資料日期 " + (last.date || "—") + " · FinMind 收盤資料";
+    status.textContent = "收盤資料";
+  } catch (e) {
+    marketSnapshot = null;
+    index.textContent = "—";
+    change.className = "market-change muted";
+    change.textContent = "暫時無法取得";
+    date.textContent = "FinMind 資料暫不可用";
+    status.textContent = "稍後再試";
+  }
+  renderMarketSummary(sectorState && sectorState.rows ? sectorState.rows : []);
+  return marketSnapshot;
 }
 
 /* ---------- 指標 ---------- */
@@ -470,7 +520,7 @@ function drawChart(canvas, a) {
   ctx.stroke();
   // 收盤線
   const up = a.chg >= 0;
-  ctx.strokeStyle = up ? "#c81e1e" : "#15803d";
+  ctx.strokeStyle = up ? (css.getPropertyValue("--up") || "#c81e1e") : (css.getPropertyValue("--down") || "#15803d");
   ctx.lineWidth = 2;
   ctx.beginPath();
   closes.forEach((v, idx) => { if (idx === 0) ctx.moveTo(X(idx), Y(v)); else ctx.lineTo(X(idx), Y(v)); });
@@ -1001,7 +1051,8 @@ function drawEquity(canvas, curve) {
   ctx.strokeStyle = "#8a94a6"; ctx.setLineDash([4, 4]);
   ctx.beginPath(); ctx.moveTo(0, Y(1)); ctx.lineTo(w, Y(1)); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.strokeStyle = curve[curve.length - 1] >= 1 ? "#c81e1e" : "#15803d";
+  const css = getComputedStyle(document.documentElement);
+  ctx.strokeStyle = curve[curve.length - 1] >= 1 ? (css.getPropertyValue("--up") || "#c81e1e") : (css.getPropertyValue("--down") || "#15803d");
   ctx.lineWidth = 2;
   ctx.beginPath();
   curve.forEach((v, i) => { if (i === 0) ctx.moveTo(X(i), Y(v)); else ctx.lineTo(X(i), Y(v)); });
@@ -1073,6 +1124,12 @@ function renderDividend(list) {
 let secScanning = false;
 let sectorReplayTimer = null;
 let sectorState = { records: [], offset: 0, selectedKey: null, rows: [] };
+const SECTOR_MAP_WIDTH = 1000;
+const SECTOR_MAP_HEIGHT = 430;
+let sectorViewport = { scale: 1, centerX: SECTOR_MAP_WIDTH / 2, centerY: SECTOR_MAP_HEIGHT / 2 };
+let sectorDrag = null;
+let sectorDidDrag = false;
+let sectorRankExpanded = false;
 
 function sumNumbers(values) { return values.reduce((sum, value) => sum + (Number(value) || 0), 0); }
 function avgNumbers(values) { return values.length ? sumNumbers(values) / values.length : 0; }
@@ -1087,6 +1144,107 @@ function sectorPhase(row) {
   if (row.flow >= 0 && row.accel < 0) return { key: "rotation", label: "輪動", desc: "買超放緩", color: "#14b8a6" };
   if (row.flow < 0 && row.accel >= 0) return { key: "watch", label: "觀望", desc: "賣超收斂", color: "#f59e0b" };
   return { key: "ebb", label: "退潮", desc: "賣超加速", color: "#ef4444" };
+}
+function resetSectorViewport() {
+  sectorViewport = { scale: 1, centerX: SECTOR_MAP_WIDTH / 2, centerY: SECTOR_MAP_HEIGHT / 2 };
+}
+function clampSectorViewport() {
+  sectorViewport.scale = Math.min(4, Math.max(1, Number(sectorViewport.scale) || 1));
+  const halfW = SECTOR_MAP_WIDTH / sectorViewport.scale / 2;
+  const halfH = SECTOR_MAP_HEIGHT / sectorViewport.scale / 2;
+  sectorViewport.centerX = Math.min(SECTOR_MAP_WIDTH - halfW, Math.max(halfW, sectorViewport.centerX));
+  sectorViewport.centerY = Math.min(SECTOR_MAP_HEIGHT - halfH, Math.max(halfH, sectorViewport.centerY));
+}
+function getSectorViewBox() {
+  clampSectorViewport();
+  const viewW = SECTOR_MAP_WIDTH / sectorViewport.scale;
+  const viewH = SECTOR_MAP_HEIGHT / sectorViewport.scale;
+  return {
+    x: sectorViewport.centerX - viewW / 2,
+    y: sectorViewport.centerY - viewH / 2,
+    width: viewW,
+    height: viewH,
+  };
+}
+function zoomSectorMap(factor, anchorX = SECTOR_MAP_WIDTH / 2, anchorY = SECTOR_MAP_HEIGHT / 2) {
+  const oldScale = sectorViewport.scale;
+  const nextScale = Math.min(4, Math.max(1, oldScale * factor));
+  if (nextScale === oldScale) return;
+  const oldWidth = SECTOR_MAP_WIDTH / oldScale;
+  const oldHeight = SECTOR_MAP_HEIGHT / oldScale;
+  const nextWidth = SECTOR_MAP_WIDTH / nextScale;
+  const nextHeight = SECTOR_MAP_HEIGHT / nextScale;
+  const oldLeft = sectorViewport.centerX - oldWidth / 2;
+  const oldTop = sectorViewport.centerY - oldHeight / 2;
+  const ratioX = (anchorX - oldLeft) / oldWidth;
+  const ratioY = (anchorY - oldTop) / oldHeight;
+  sectorViewport = {
+    scale: nextScale,
+    centerX: anchorX - ratioX * nextWidth + nextWidth / 2,
+    centerY: anchorY - ratioY * nextHeight + nextHeight / 2,
+  };
+  clampSectorViewport();
+  renderSectorMap();
+}
+function sectorPointFromEvent(svg, event) {
+  const rect = svg && typeof svg.getBoundingClientRect === "function" ? svg.getBoundingClientRect() : null;
+  const box = getSectorViewBox();
+  if (!rect || !rect.width || !rect.height) return { x: SECTOR_MAP_WIDTH / 2, y: SECTOR_MAP_HEIGHT / 2 };
+  return {
+    x: box.x + (event.clientX - rect.left) / rect.width * box.width,
+    y: box.y + (event.clientY - rect.top) / rect.height * box.height,
+  };
+}
+function bindSectorChartGestures(host) {
+  if (!host) return;
+  const svg = host.querySelector("svg");
+  if (!svg) {
+    host.onwheel = null;
+    host.onpointerdown = null;
+    host.onpointermove = null;
+    host.onpointerup = null;
+    host.onpointercancel = null;
+    return;
+  }
+  host.onwheel = (event) => {
+    event.preventDefault();
+    const point = sectorPointFromEvent(svg, event);
+    zoomSectorMap(event.deltaY < 0 ? 1.22 : 1 / 1.22, point.x, point.y);
+  };
+  host.onpointerdown = (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    const rect = svg.getBoundingClientRect();
+    sectorDrag = { id: event.pointerId, clientX: event.clientX, clientY: event.clientY, rect, moved: false };
+    if (typeof host.setPointerCapture === "function" && event.pointerId !== undefined) {
+      try { host.setPointerCapture(event.pointerId); } catch (e) { /* 部分瀏覽器不支援 */ }
+    }
+  };
+  host.onpointermove = (event) => {
+    if (!sectorDrag || (event.pointerId !== undefined && sectorDrag.id !== event.pointerId)) return;
+    const dx = event.clientX - sectorDrag.clientX;
+    const dy = event.clientY - sectorDrag.clientY;
+    if (Math.abs(dx) + Math.abs(dy) < 2) return;
+    const box = getSectorViewBox();
+    const rect = sectorDrag.rect;
+    sectorViewport.centerX -= dx / Math.max(1, rect.width) * box.width;
+    sectorViewport.centerY -= dy / Math.max(1, rect.height) * box.height;
+    clampSectorViewport();
+    sectorDrag.clientX = event.clientX;
+    sectorDrag.clientY = event.clientY;
+    sectorDrag.moved = true;
+    renderSectorMap();
+  };
+  const endDrag = (event) => {
+    if (!sectorDrag || (event && event.pointerId !== undefined && sectorDrag.id !== event.pointerId)) return;
+    const moved = sectorDrag.moved;
+    sectorDrag = null;
+    if (moved) {
+      sectorDidDrag = true;
+      setTimeout(() => { sectorDidDrag = false; }, 0);
+    }
+  };
+  host.onpointerup = endDrag;
+  host.onpointercancel = endDrag;
 }
 function getSectorOffsetMax() {
   const usable = sectorState.records
@@ -1151,14 +1309,41 @@ function getSectorRows(offset) {
 }
 function setSectorControls(rows, maxOffset) {
   const hasRows = rows.length > 0;
-  $("sec-view").disabled = !hasRows;
-  $("sec-buy-only").disabled = !hasRows;
-  $("btn-sector-play").disabled = !hasRows || maxOffset === 0;
-  $("sec-offset").disabled = !hasRows || maxOffset === 0;
+  const canInteract = hasRows && !secScanning;
+  $("sec-view").disabled = !canInteract;
+  $("sec-buy-only").disabled = !canInteract;
+  $("sec-hot-only").disabled = !canInteract;
+  $("btn-sector-play").disabled = !canInteract || maxOffset === 0;
+  $("sec-offset").disabled = !canInteract || maxOffset === 0;
+  $("btn-sector-zoom-in").disabled = !canInteract;
+  $("btn-sector-zoom-out").disabled = !canInteract;
+  $("btn-sector-reset").disabled = !canInteract;
   $("sec-offset").max = String(maxOffset);
   $("sec-offset").value = String(sectorState.offset);
   const date = rows[0] && rows[0].date;
   $("sec-date").textContent = date ? date + (sectorState.offset ? " · " + sectorState.offset + " 個交易日前" : " · 最新") : "尚未掃描";
+  const freshness = $("sector-freshness");
+  if (freshness) freshness.textContent = secScanning
+    ? "正在建立本次掃描資料"
+    : date ? "資料日期 " + date + " · FinMind 收盤資料" : "完成掃描後顯示資料日期";
+}
+function renderMarketSummary(rows) {
+  const host = $("market-summary");
+  if (!host) return;
+  if (secScanning) {
+    host.innerHTML = '<span class="market-summary-label">本次掃描進行中</span><span>已整理 ' + sectorState.records.length + ' 檔；完成後才會產生完整資金重點。</span>';
+    return;
+  }
+  if (!rows || !rows.length) {
+    host.innerHTML = '<span class="market-summary-label">今天怎麼開始？</span><span>先建立快速看盤地圖，確認資金轉向後再下鑽個股。</span>';
+    return;
+  }
+  const lead = rows.filter((row) => row.phase.key === "tide").sort((a, b) => b.accel - a.accel || b.flow - a.flow)[0]
+    || rows.slice().sort((a, b) => Math.abs(b.flow) - Math.abs(a.flow))[0];
+  const cooling = rows.filter((row) => row.phase.key === "rotation").sort((a, b) => b.flow - a.flow)[0];
+  const first = lead ? '<b>' + esc(lead.label) + '</b> 位於' + esc(lead.phase.label) + '區，近 5 日法人 ' + esc(signedLots(lead.flow)) + ' 張。' : "";
+  const second = cooling ? '另有 <b>' + esc(cooling.label) + '</b> 仍買超、但動能放緩。' : "";
+  host.innerHTML = '<span class="market-summary-label">本次掃描重點</span><span>' + first + second + ' 點擊地圖確認成分股與價格結構。</span>';
 }
 function renderSectorInsight(rows) {
   const phases = [
@@ -1272,28 +1457,48 @@ function selectSectorRow(key) {
   sectorState.selectedKey = sectorState.selectedKey === key ? null : key;
   renderSectorMap();
 }
+function getSectorTrail(row, steps = 3) {
+  const maxOffset = getSectorOffsetMax();
+  const trail = [];
+  for (let offset = Math.min(maxOffset, sectorState.offset + steps); offset >= sectorState.offset; offset--) {
+    const point = getSectorRows(offset).find((item) => item.key === row.key);
+    if (point) trail.push(point);
+  }
+  return trail;
+}
 function drawSector(host, rows) {
   if (!host) return;
   hideSectorTooltip();
   if (!rows.length) {
     host.innerHTML = '<div class="alert" style="margin:12px">沒有符合目前條件的資料；可以取消「只看法人淨買」或重新掃描。</div>';
+    bindSectorChartGestures(host);
     return;
   }
   const buyOnly = $("sec-buy-only").checked;
-  const visible = rows.filter((row) => !buyOnly || row.flow >= 0);
+  const hotOnly = $("sec-hot-only").checked;
+  let visible = rows.filter((row) => !buyOnly || row.flow >= 0);
+  if (hotOnly && visible.length > 10) {
+    visible = visible.slice().sort((a, b) => (Math.abs(b.flow) + Math.abs(b.accel) * 3) - (Math.abs(a.flow) + Math.abs(a.accel) * 3)).slice(0, 10);
+  }
   if (!visible.length) {
-    host.innerHTML = '<div class="alert" style="margin:12px">目前沒有法人淨買的項目，取消篩選即可看完整地圖。</div>';
+    host.innerHTML = '<div class="alert" style="margin:12px">目前沒有符合篩選條件的項目，取消篩選即可看完整地圖。</div>';
+    bindSectorChartGestures(host);
     return;
   }
-  const width = 1000, height = 430, left = 86, right = 38, top = 38, bottom = 58;
+  const width = SECTOR_MAP_WIDTH, height = SECTOR_MAP_HEIGHT, left = 86, right = 38, top = 38, bottom = 58;
   const xMax = Math.max(1, ...visible.map((row) => Math.abs(row.flow))) * 1.18;
   const yMax = Math.max(1, ...visible.map((row) => Math.abs(row.accel))) * 1.28;
+  const clamp = (value, max) => Math.max(-max, Math.min(max, value));
   const X = (value) => left + (value + xMax) / (xMax * 2) * (width - left - right);
   const Y = (value) => top + (1 - (value + yMax) / (yMax * 2)) * (height - top - bottom);
   const xZero = X(0), yZero = Y(0);
   const maxVol = Math.max(1, ...visible.map((row) => row.vol));
   const trunc = (value, max = 9) => value.length > max ? value.slice(0, max - 1) + "…" : value;
-  let svg = '<svg viewBox="0 0 ' + width + " " + height + '" preserveAspectRatio="xMidYMid meet" aria-label="資金動能四象限地圖">';
+  const ranked = visible.slice().sort((a, b) => (Math.abs(b.flow) + Math.abs(b.accel) * 3) - (Math.abs(a.flow) + Math.abs(a.accel) * 3));
+  const compact = typeof window !== "undefined" && window.innerWidth <= 680;
+  const labelKeys = new Set(ranked.slice(0, compact ? 6 : Math.min(15, visible.length)).map((row) => row.key));
+  const view = getSectorViewBox();
+  let svg = '<svg viewBox="' + view.x + " " + view.y + " " + view.width + " " + view.height + '" preserveAspectRatio="xMidYMid meet" aria-label="資金動能四象限地圖">';
   svg += '<rect x="' + xZero + '" y="' + top + '" width="' + (width - right - xZero) + '" height="' + (yZero - top) + '" fill="rgba(37,99,235,.06)" />';
   svg += '<rect x="' + xZero + '" y="' + yZero + '" width="' + (width - right - xZero) + '" height="' + (height - bottom - yZero) + '" fill="rgba(20,184,166,.06)" />';
   svg += '<rect x="' + left + '" y="' + top + '" width="' + (xZero - left) + '" height="' + (yZero - top) + '" fill="rgba(245,158,11,.06)" />';
@@ -1314,23 +1519,38 @@ function drawSector(host, rows) {
   svg += '<text class="sector-axis-title" x="' + ((left + width - right) / 2) + '" y="' + (height - 14) + '" text-anchor="middle">← 法人賣超　近 5 日法人淨買賣超（張）　法人買超 →</text>';
   svg += '<text class="sector-axis-title" transform="translate(22 ' + ((top + height - bottom) / 2) + ') rotate(-90)" text-anchor="middle">法人加速度（近 5 日相對前 15 日，張／日）</text>';
   visible.forEach((row) => {
+    const trail = getSectorTrail(row);
+    if (trail.length > 1) {
+      const points = trail.map((point) => X(clamp(point.flow, xMax)) + "," + Y(clamp(point.accel, yMax))).join(" ");
+      svg += '<polyline class="sector-trail" points="' + points + '" stroke="' + row.phase.color + '" />';
+    }
+  });
+  visible.forEach((row) => {
     const radius = 11 + 28 * Math.sqrt(Math.max(0, row.vol) / maxVol);
     const x = X(row.flow), y = Y(row.accel);
     const selected = sectorState.selectedKey === row.key ? " selected" : "";
+    const showLabel = labelKeys.has(row.key) || sectorState.selectedKey === row.key;
     svg += '<g class="sector-bubble' + selected + '" data-sector-key="' + esc(row.key) + '" role="button" tabindex="0" aria-label="' + esc(row.label + "，" + row.phase.label + "，法人 " + signedLots(row.flow) + " 張") + '">';
     svg += '<title>' + esc(row.label + " · " + row.phase.label + " · 法人 " + signedLots(row.flow) + " 張") + '</title>';
-    svg += '<circle cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + row.phase.color + '" fill-opacity=".72" />';
-    svg += '<text class="sector-bubble-label" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y - 2) + '">' + esc(trunc(row.label)) + '</text>';
-    svg += '<text class="sector-bubble-value" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y + 14) + '">' + esc(signedLots(row.flow) + " 張") + '</text></g>';
+    svg += '<circle cx="' + x + '" cy="' + y + '" r="' + radius + '" fill="' + row.phase.color + '" fill-opacity=".74" />';
+    if (showLabel) {
+      svg += '<text class="sector-bubble-label" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y - 2) + '">' + esc(trunc(row.label)) + '</text>';
+      svg += '<text class="sector-bubble-value" x="' + Math.min(width - right - 4, x + radius + 5) + '" y="' + (y + 14) + '">' + esc(signedLots(row.flow) + " 張") + '</text>';
+    }
+    svg += '</g>';
   });
   svg += '</svg>';
   host.innerHTML = svg;
+  bindSectorChartGestures(host);
   host.querySelectorAll("[data-sector-key]").forEach((el) => {
     const row = rows.find((item) => item.key === el.getAttribute("data-sector-key"));
     if (!row) return;
     el.addEventListener("pointerenter", () => showSectorTooltip(row));
     el.addEventListener("pointerleave", hideSectorTooltip);
-    el.addEventListener("click", () => selectSectorRow(row.key));
+    el.addEventListener("click", () => {
+      if (sectorDidDrag) { sectorDidDrag = false; return; }
+      selectSectorRow(row.key);
+    });
     el.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectSectorRow(row.key); } });
   });
 }
@@ -1359,14 +1579,23 @@ function renderSectorDetail(rows) {
   }));
 }
 function renderSectorTable(rows) {
-  $("sector-result").innerHTML = rows.length ? '<div class="table-wrap"><table><thead><tr><th>板塊／個股</th><th>階段</th><th>檔數</th><th>20 日漲跌</th><th>法人 5 日（張）</th><th>加速度（張/日）</th><th>近 20 日均量（張）</th></tr></thead><tbody>' +
-    rows.map((row) => '<tr><td><button class="sector-link" type="button" data-sector-select="' + esc(row.key) + '">' + esc(row.label) + '</button></td>' +
+  const host = $("sector-result");
+  const shown = sectorRankExpanded ? rows : rows.slice(0, 10);
+  const canExpand = rows.length > 10;
+  host.innerHTML = rows.length ? '<div class="sector-ranking-head"><div><span class="section-kicker">FLOW RANKING</span><b>本次掃描排行</b><span class="muted">顯示 ' + shown.length + ' / ' + rows.length + ' 項</span></div>' +
+    (canExpand ? '<button type="button" class="ghost" data-sector-rank-toggle="true">' + (sectorRankExpanded ? "收合至前 10" : "查看全部") + '</button>' : "") + '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th>板塊／個股</th><th>階段</th><th>檔數</th><th>20 日漲跌</th><th>法人 5 日（張）</th><th>加速度（張/日）</th><th>近 20 日均量（張）</th></tr></thead><tbody>' +
+    shown.map((row) => '<tr><td><button class="sector-link" type="button" data-sector-select="' + esc(row.key) + '">' + esc(row.label) + '</button></td>' +
       '<td><span class="pill ' + (row.flow >= 0 ? "good" : "bad") + '">' + esc(row.phase.label) + '</span></td><td class="num">' + row.n + '</td>' +
       '<td class="num ' + (row.ret20 >= 0 ? "up" : "down") + '">' + (row.ret20 >= 0 ? "+" : "") + fmtNum(row.ret20, 1) + '%</td>' +
       '<td class="num ' + (row.flow >= 0 ? "up" : "down") + '">' + signedLots(row.flow) + '</td>' +
       '<td class="num ' + (row.accel >= 0 ? "up" : "down") + '">' + signedLots(row.accel, 1) + '</td>' +
       '<td class="num">' + fmtLots(row.vol) + '</td></tr>').join("") + '</tbody></table></div>' : "";
-  $("sector-result").querySelectorAll("[data-sector-select]").forEach((button) => button.addEventListener("click", () => selectSectorRow(button.getAttribute("data-sector-select"))));
+  host.querySelectorAll("[data-sector-select]").forEach((button) => button.addEventListener("click", () => selectSectorRow(button.getAttribute("data-sector-select"))));
+  host.querySelectorAll("[data-sector-rank-toggle]").forEach((button) => button.addEventListener("click", () => {
+    sectorRankExpanded = !sectorRankExpanded;
+    renderSectorTable(rows);
+  }));
 }
 function renderSectorMap() {
   const maxOffset = getSectorOffsetMax();
@@ -1377,6 +1606,7 @@ function renderSectorMap() {
   setSectorControls(rows, maxOffset);
   renderSectorInsight(rows);
   renderSectorFocus(rows);
+  renderMarketSummary(rows);
   drawSector($("sector-chart"), rows);
   renderSectorDetail(rows);
   renderSectorTable(rows);
@@ -1408,15 +1638,22 @@ async function doSector() {
   if (!pool.length) { $("sec-status").textContent = poolSel === "custom" ? "自訂池是空的，請先在海選頁籤設定。" : poolSel === "watch" ? "追蹤清單是空的，先到個股診斷加入。" : "「" + poolLabel(poolSel) + "」沒有成分，請換一個股票池。"; return; }
   stopSectorReplay();
   sectorState = { records: [], offset: 0, selectedKey: null, rows: [] };
+  resetSectorViewport();
+  sectorRankExpanded = false;
   secScanning = true;
   $("btn-sector").disabled = true;
   $("btn-sector").textContent = "建立中…";
   $("sec-view").disabled = true;
   $("sec-buy-only").disabled = true;
+  $("sec-hot-only").disabled = true;
   $("btn-sector-play").disabled = true;
   $("sec-offset").disabled = true;
+  $("btn-sector-zoom-in").disabled = true;
+  $("btn-sector-zoom-out").disabled = true;
+  $("btn-sector-reset").disabled = true;
   $("sec-offset").value = "0";
   $("sec-date").textContent = "掃描中";
+  $("sector-freshness").textContent = "正在建立本次掃描資料";
   $("sec-bar").style.width = "0%";
   $("sec-status").textContent = "準備掃描「" + poolLabel(poolSel) + "」共 " + pool.length + " 檔…";
   $("sector-insight").innerHTML = "";
@@ -1424,6 +1661,7 @@ async function doSector() {
   $("sector-detail").innerHTML = "";
   $("sector-result").innerHTML = "";
   $("sector-chart").innerHTML = '<p class="muted" style="padding:16px">建立資金動能地圖中…</p>';
+  renderMarketSummary([]);
   let ok = 0, fail = 0;
   await loadInfoMap(false);
   for (let idx = 0; idx < pool.length; idx++) {
@@ -1768,7 +2006,7 @@ function methodHtml() {
     "<span class='muted'>候選比較</span><span>海選預設只顯示最終通過的標的；可切換看全部，再從結果中選 2–3 檔帶入比較。候選選取與追蹤清單皆只存在本機。</span>" +
     "<span class='muted'>回測</span><span>MACD 金叉買、死叉賣，隔日開盤價執行；勝率、平均報酬、最大回檔與 Buy&Hold 同期比較。未計成本，僅驗方向性。</span>" +
     "<span class='muted'>除息</span><span>近一年已公告現金股利合計 / 現價為殖利率；尚未公告最新一期者會被低估，僅供篩選起點。</span>" +
-    "<span class='muted'>資金動能地圖</span><span>先選快速看盤（10 檔）或完整市場（50 檔），再把掃描結果放入資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。「今天先看這三件事」只彙整本次掃描資料，可切換產業／個股、只看淨買，並回放最近 20 個交易日。</span>" +
+    "<span class='muted'>資金動能地圖</span><span>先選快速看盤（10 檔）或完整市場（50 檔），再把掃描結果放入資金動能四象限：X 為近 5 日法人淨買賣超、Y 為近 5 日每日均量相對前 15 日的加速度、泡泡大小為近 20 日均量。右上漲潮＝買超加速；右下輪動＝買超放緩；左上觀望＝賣超收斂；左下退潮＝賣超加速。「今天先看這三件事」只彙整本次掃描資料；可切換產業／個股、只看關鍵 10、回放最近 20 個交易日，也可滾輪縮放或拖曳移動查看密集泡泡。</span>" +
     "<span class='muted'>筆記</span><span>研究筆記只存本機 localStorage，跨裝置不會同步；僅供個人研究記錄。</span>" +
     "<span class='muted'>警示日報</span><span>以追蹤清單為對象的收盤條件檢查，需開著本頁才會每 60 分鐘跑一次；重要價位以券商警示為準。</span>" +
     "<span class='muted'>動能 MD14</span><span>14 日漲跌幅，站穩為正；沿用原站口徑摘要。</span>" +
@@ -1782,8 +2020,10 @@ function methodHtml() {
 /* ---------- 啟動 ---------- */
 document.addEventListener("DOMContentLoaded", () => {
   applyTheme(localStorage.getItem(LS_THEME) || "light");
+  applyPriceColors(localStorage.getItem(LS_COLOR_MODE) || "tw");
   renderHotRecent();
   renderWatch();
+  loadMarketSnapshot();
   $("method-body").innerHTML = methodHtml();
   document.querySelectorAll("nav.tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.getAttribute("data-tab"))));
   $("btn-analyze").addEventListener("click", () => doAnalyze($("q").value));
@@ -1839,11 +2079,20 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!sectorState.records.length) return;
     stopSectorReplay();
     sectorState.selectedKey = null;
+    sectorRankExpanded = false;
+    resetSectorViewport();
     renderSectorMap();
   });
   $("sec-buy-only").addEventListener("change", () => {
     if (!sectorState.records.length) return;
     sectorState.selectedKey = null;
+    resetSectorViewport();
+    renderSectorMap();
+  });
+  $("sec-hot-only").addEventListener("change", () => {
+    if (!sectorState.records.length) return;
+    sectorState.selectedKey = null;
+    resetSectorViewport();
     renderSectorMap();
   });
   $("sec-offset").addEventListener("input", () => {
@@ -1853,6 +2102,9 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSectorMap();
   });
   $("btn-sector-play").addEventListener("click", toggleSectorReplay);
+  $("btn-sector-zoom-in").addEventListener("click", () => zoomSectorMap(1.35));
+  $("btn-sector-zoom-out").addEventListener("click", () => zoomSectorMap(1 / 1.35));
+  $("btn-sector-reset").addEventListener("click", () => { resetSectorViewport(); renderSectorMap(); });
   $("btn-note-load").addEventListener("click", () => noteLoad());
   $("note-code").addEventListener("keydown", (e) => { if (e.key === "Enter") noteLoad(); });
   $("btn-note-save").addEventListener("click", noteSave);
@@ -1867,6 +2119,17 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) { /* 定時檢查失敗不打擾 */ }
   }, 60 * 60 * 1000);
   $("btn-theme").addEventListener("click", () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
+  $("btn-colors").addEventListener("click", () => applyPriceColors(document.documentElement.getAttribute("data-price-colors") === "us" ? "tw" : "us"));
+  $("btn-open-sector").addEventListener("click", () => {
+    switchTab("sector");
+    const target = $("tab-sector");
+    if (target && typeof target.scrollIntoView === "function") target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("btn-open-watch").addEventListener("click", () => {
+    switchTab("watch");
+    const target = $("tab-watch");
+    if (target && typeof target.scrollIntoView === "function") target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   $("btn-token").addEventListener("click", () => { $("token-input").value = getToken(); $("dlg-token").showModal(); });
   $("token-cancel").addEventListener("click", () => $("dlg-token").close());
   $("token-save").addEventListener("click", () => {
